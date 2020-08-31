@@ -110,7 +110,7 @@
  * EXTENT_MAX_COUNT:	the maximum number of extents for exchanging between
  *			kernel-space and user-space per ioctl
  */
-#define EXTENT_MAX_COUNT	512
+#define EXTENT_MAX_COUNT	32768
 
 /* The following macros are error message */
 #define MSG_USAGE		\
@@ -601,7 +601,14 @@ static int insert_extent_by_logical(struct fiemap_extent_list **ext_list_head,
 		return 0;
 	}
 
-	if (ext->data.logical <= ext_list_tmp->data.logical) {
+	if (ext->data.logical >= ext_list_tmp->prev->data.logical) {
+		/* Insert after tail, set current pointer to tail */
+		if (ext->data.logical <
+		    ext_list_tmp->prev->data.logical +
+			ext_list_tmp->prev->data.len)
+			/* Overlap */
+			goto out;
+	} else if (ext->data.logical <= ext_list_tmp->data.logical) {
 		/* Insert before head */
 		if (ext_list_tmp->data.logical <
 			ext->data.logical + ext->data.len)
@@ -659,7 +666,14 @@ static int insert_extent_by_physical(struct fiemap_extent_list **ext_list_head,
 		return 0;
 	}
 
-	if (ext->data.physical <= ext_list_tmp->data.physical) {
+	if (ext->data.physical >= ext_list_tmp->prev->data.physical) {
+		/* Insert after tail, set current pointer to tail */
+		if (ext->data.physical <
+		    ext_list_tmp->prev->data.physical +
+			ext_list_tmp->prev->data.len)
+			/* Overlap */
+			goto out;
+	} else if (ext->data.physical <= ext_list_tmp->data.physical) {
 		/* Insert before head */
 		if (ext_list_tmp->data.physical <
 					ext->data.physical + ext->data.len)
