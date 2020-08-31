@@ -20,6 +20,7 @@
 #endif
 
 #include "config.h"
+#include "support/list_sort.h"
 #include <ctype.h>
 #include <dirent.h>
 #include <endian.h>
@@ -126,18 +127,6 @@
 
 /* Data type for filesystem-wide blocks number */
 typedef unsigned long long ext4_fsblk_t;
-
-struct fiemap_extent_data {
-	__u64 len;			/* blocks count */
-	__u64 logical;		/* start logical block number */
-	ext4_fsblk_t physical;		/* start physical block number */
-};
-
-struct fiemap_extent_list {
-	struct fiemap_extent_list *prev;
-	struct fiemap_extent_list *next;
-	struct fiemap_extent_data data;	/* extent belong to file */
-};
 
 struct fiemap_extent_group {
 	struct fiemap_extent_group *prev;
@@ -794,6 +783,43 @@ static int join_extents(struct fiemap_extent_list *ext_list_head,
 	return 0;
 }
 
+static int cmp_physical(void *priv, struct list_head *a, struct list_head *b)
+{
+	return ((struct fiemap_extent_list*)a)->data.physical >
+		((struct fiemap_extent_list*)b)->data.physical;
+}
+
+static int cmp_logical(void *priv, struct list_head *a, struct list_head *b)
+{
+	return ((struct fiemap_extent_list*)a)->data.logical >
+		((struct fiemap_extent_list*)b)->data.logical;
+}
+
+static int sort_list_physical(struct fiemap_extent_list **physical_list_head)
+{
+	struct fiemap_extent_list *ext_list_tmp = NULL;
+
+	/* Insert empty list cell for list_sort to point at */
+	ext_list_tmp = malloc(sizeof(struct fiemap_extent_list));
+	if (ext_list_tmp == NULL)
+		return -1;
+
+	ext_list_tmp->next = (*physical_list_head);
+	ext_list_tmp->prev = (*physical_list_head)->prev;
+	(*physical_list_head)->prev->next = ext_list_tmp;
+	(*physical_list_head)->prev = ext_list_tmp;
+
+	list_sort(NULL, ext_list_tmp, &cmp_physical);
+
+	/* Move logical list head to first actual cell */
+	ext_list_tmp->prev->next = ext_list_tmp->next;
+	ext_list_tmp->next->prev = ext_list_tmp->prev;
+	*physical_list_head = ext_list_tmp->next;
+	FREE(ext_list_tmp);
+
+	return 0;
+}
+
 /*
  * get_file_extents() -	Get file's extent list.
  *
@@ -849,11 +875,13 @@ static int get_file_extents(int fd, struct fiemap_extent_list **ext_list_head)
 			ext_list->data.len = ext_buf[i].fe_length
 						/ block_size;
 
-			ret = insert_extent_by_physical(
-					ext_list_head, ext_list);
-			if (ret < 0) {
-				FREE(ext_list);
-				goto out;
+			/* First element */
+			if (*ext_list_head == NULL) {
+				(*ext_list_head) = ext_list;
+				(*ext_list_head)->prev = *ext_list_head;
+				(*ext_list_head)->next = *ext_list_head;
+			} else {
+				insert((*ext_list_head), ext_list);
 			}
 		}
 		/* Record file's logical offset this time */
@@ -869,6 +897,9 @@ static int get_file_extents(int fd, struct fiemap_extent_list **ext_list_head)
 					& FIEMAP_EXTENT_LAST));
 
 	FREE(fiemap_buf);
+
+	sort_list_physical(ext_list_head);
+
 	return 0;
 out:
 	FREE(fiemap_buf);
@@ -928,34 +959,26 @@ static int change_physical_to_logical(
 			struct fiemap_extent_list **physical_list_head,
 			struct fiemap_extent_list **logical_list_head)
 {
-	int ret;
-	struct fiemap_extent_list *ext_list_tmp = *physical_list_head;
-	struct fiemap_extent_list *ext_list_next = ext_list_tmp->next;
+	struct fiemap_extent_list *ext_list_tmp = NULL;
 
-	while (1) {
-		if (ext_list_tmp == ext_list_next) {
-			ret = insert_extent_by_logical(
-				logical_list_head, ext_list_tmp);
-			if (ret < 0)
-				return -1;
+	/* Insert empty list cell for list_sort to point at */
+	ext_list_tmp = malloc(sizeof(struct fiemap_extent_list));
+	if (ext_list_tmp == NULL)
+		return -1;
 
-			*physical_list_head = NULL;
-			break;
-		}
+	ext_list_tmp->next = (*physical_list_head);
+	ext_list_tmp->prev = (*physical_list_head)->prev;
+	(*physical_list_head)->prev->next = ext_list_tmp;
+	(*physical_list_head)->prev = ext_list_tmp;
 
-		ext_list_tmp->prev->next = ext_list_tmp->next;
-		ext_list_tmp->next->prev = ext_list_tmp->prev;
-		*physical_list_head = ext_list_next;
+	list_sort(NULL, ext_list_tmp, &cmp_logical);
 
-		ret = insert_extent_by_logical(
-			logical_list_head, ext_list_tmp);
-		if (ret < 0) {
-			FREE(ext_list_tmp);
-			return -1;
-		}
-		ext_list_tmp = ext_list_next;
-		ext_list_next = ext_list_next->next;
-	}
+	/* Move logical list head to first actual cell */
+	ext_list_tmp->prev->next = ext_list_tmp->next;
+	ext_list_tmp->next->prev = ext_list_tmp->prev;
+	*logical_list_head = ext_list_tmp->next;
+	*physical_list_head = NULL;
+	FREE(ext_list_tmp);
 
 	return 0;
 }
@@ -985,9 +1008,14 @@ static ext4_fsblk_t get_file_blocks(struct fiemap_extent_list *ext_list_head)
 static void free_ext(struct fiemap_extent_list *ext_list_head)
 {
 	struct fiemap_extent_list	*ext_list_tmp = NULL;
+	int count=0;
 
-	if (ext_list_head == NULL)
+	if (ext_list_head == NULL) {
+#ifdef DEBUG
+		printf("DEBUG: Freed no extents.\n");
+#endif
 		return;
+	}
 
 	while (ext_list_head->next != ext_list_head) {
 		ext_list_tmp = ext_list_head;
@@ -995,8 +1023,12 @@ static void free_ext(struct fiemap_extent_list *ext_list_head)
 		ext_list_head->next->prev = ext_list_head->prev;
 		ext_list_head = ext_list_head->next;
 		free(ext_list_tmp);
+		count++;
 	}
 	free(ext_list_head);
+#ifdef DEBUG
+	printf("DEBUG: Freed %d extents.\n", ++count);
+#endif
 }
 
 /*
@@ -1502,6 +1534,9 @@ static int file_defrag(const char *file, const struct stat64 *buf,
 
 	/* Get the count of file's continuous physical region */
 	orig_physical_cnt = get_physical_count(orig_list_physical);
+#ifdef DEBUG
+	printf("DEBUG: orig_physical_cnt = %d\n", orig_physical_cnt);
+#endif
 
 	/* Change list from physical to logical */
 	ret = change_physical_to_logical(&orig_list_physical,
@@ -1516,8 +1551,14 @@ static int file_defrag(const char *file, const struct stat64 *buf,
 
 	/* Count file fragments before defrag */
 	file_frags_start = get_logical_count(orig_list_logical);
+#ifdef DEBUG
+	printf("DEBUG: file_frags_start = %d\n", file_frags_start);
+#endif
 
 	blk_count = get_file_blocks(orig_list_logical);
+#ifdef DEBUG
+	printf("DEBUG: blk_count = %d\n", blk_count);
+#endif
 	if (file_check(fd, buf, file, file_frags_start, blk_count) < 0)
 		goto out;
 
@@ -1530,6 +1571,9 @@ static int file_defrag(const char *file, const struct stat64 *buf,
 	}
 
 	best = get_best_count(blk_count);
+#ifdef DEBUG
+	printf("DEBUG: best = %d\n", best);
+#endif
 
 	if (file_frags_start <= best)
 		goto check_improvement;
@@ -1543,6 +1587,10 @@ static int file_defrag(const char *file, const struct stat64 *buf,
 		}
 		goto out;
 	}
+#ifdef DEBUG
+	int file_frags_joined = get_logical_count(orig_list_logical);
+	printf("DEBUG: file_frags_joined = %d\n", file_frags_joined);
+#endif
 
 	/* Create donor inode */
 	memset(tmp_inode_name, 0, PATH_MAX + 8);
@@ -1600,6 +1648,9 @@ static int file_defrag(const char *file, const struct stat64 *buf,
 
 	/* Calculate donor inode's continuous physical region */
 	donor_physical_cnt = get_physical_count(donor_list_physical);
+#ifdef DEBUG
+	printf("DEBUG: donor_physical_cnt = %d\n", donor_physical_cnt);
+#endif
 
 	/* Change donor extent list from physical to logical */
 	ret = change_physical_to_logical(&donor_list_physical,
@@ -1611,6 +1662,10 @@ static int file_defrag(const char *file, const struct stat64 *buf,
 		}
 		goto out;
 	}
+#ifdef DEBUG
+	int donor_logical_cnt = get_logical_count(donor_list_logical);
+	printf("DEBUG: donor_logical_cnt = %d\n", donor_logical_cnt);
+#endif
 
 check_improvement:
 	if (mode_flag & DETAIL) {
@@ -1677,6 +1732,7 @@ out:
 	free_ext(orig_list_physical);
 	free_ext(orig_list_logical);
 	free_ext(donor_list_physical);
+	free_ext(donor_list_logical);
 	free_exts_group(orig_group_head);
 	return 0;
 }

@@ -22,6 +22,7 @@ OBJS=		cstring.o \
 		quotaio.o \
 		quotaio_v2.o \
 		quotaio_tree.o \
+		list_sort.o \
 		dict.o
 
 SRCS=		$(srcdir)/argv_parse.c \
@@ -35,6 +36,7 @@ SRCS=		$(srcdir)/argv_parse.c \
 		$(srcdir)/quotaio.c \
 		$(srcdir)/quotaio_tree.c \
 		$(srcdir)/quotaio_v2.c \
+		$(srcdir)/list_sort.c \
 		$(srcdir)/dict.c
 
 LIBRARY= libsupport
