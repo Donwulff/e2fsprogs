@@ -747,9 +747,14 @@ static int join_extents(struct fiemap_extent_list *ext_list_head,
 		/* This extent and previous extent are not continuous,
 		 * so, all previous extents are treated as an extent group.
 		 */
-		if ((ext_list_tmp->prev->data.logical +
-			ext_list_tmp->prev->data.len)
-				!= ext_list_tmp->data.logical) {
+		__u64 hole_len = ext_list_tmp->data.logical -
+			(ext_list_tmp->prev->data.logical + ext_list_tmp->prev->data.len);
+		if ((hole_len >= 8) || (hole_len < 0)) {
+#ifdef DEBUG
+			printf("DEBUG: break at prev: %d + %d, this: %d + %d (%d blocks)\n", ext_list_tmp->prev->data.logical,
+				ext_list_tmp->prev->data.len, ext_list_tmp->data.logical, ext_list_tmp->data.len,
+				hole_len);
+#endif
 			ext_group_tmp =
 				malloc(sizeof(struct fiemap_extent_group));
 			if (ext_group_tmp == NULL)
@@ -776,7 +781,7 @@ static int join_extents(struct fiemap_extent_list *ext_list_head,
 		 * so, they belong to the same extent group, and we check
 		 * if the next extent belongs to the same extent group.
 		 */
-		len += ext_list_tmp->data.len;
+		len += ext_list_tmp->data.len + hole_len;
 		ext_list_tmp = ext_list_tmp->next;
 	} while (ext_list_tmp != ext_list_head->next);
 
