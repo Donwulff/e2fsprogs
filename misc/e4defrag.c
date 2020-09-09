@@ -1352,7 +1352,7 @@ static void print_progress(const char *file, loff_t start, loff_t file_size)
  * @ext_list_head:	head of the extent list.
  */
 static int call_defrag(int fd, int donor_fd, const char *file,
-	const struct stat64 *buf, struct fiemap_extent_list *ext_list_head)
+	const struct stat64 *buf, struct fiemap_extent_group *ext_list_head)
 {
 	loff_t	start = 0;
 	unsigned int	page_num;
@@ -1360,7 +1360,7 @@ static int call_defrag(int fd, int donor_fd, const char *file,
 	int	defraged_ret = 0;
 	int	ret;
 	struct move_extent	move_data;
-	struct fiemap_extent_list	*ext_list_tmp = NULL;
+	struct fiemap_extent_group	*ext_list_tmp = NULL;
 
 	memset(&move_data, 0, sizeof(struct move_extent));
 	move_data.donor_fd = donor_fd;
@@ -1370,10 +1370,10 @@ static int call_defrag(int fd, int donor_fd, const char *file,
 
 	ext_list_tmp = ext_list_head;
 	do {
-		move_data.orig_start = ext_list_tmp->data.logical;
+		move_data.orig_start = ext_list_tmp->start->data.logical;
 		/* Logical offset of orig and donor should be same */
 		move_data.donor_start = move_data.orig_start;
-		move_data.len = ext_list_tmp->data.len;
+		move_data.len = ext_list_tmp->len;
 		move_data.moved_len = 0;
 
 		ret = page_in_core(fd, move_data, &vec, &page_num);
@@ -1468,6 +1468,7 @@ static int file_defrag(const char *file, const struct stat64 *buf,
 	struct fiemap_extent_list	*donor_list_logical = NULL;
 	struct fiemap_extent_group	*orig_group_head = NULL;
 	struct fiemap_extent_group	*orig_group_tmp = NULL;
+	struct fiemap_extent_group	*donor_group_head = NULL;
 
 	defraged_file_count++;
 	if (defraged_file_count > total_count)
@@ -1667,6 +1668,16 @@ static int file_defrag(const char *file, const struct stat64 *buf,
 	printf("DEBUG: donor_logical_cnt = %d\n", donor_logical_cnt);
 #endif
 
+	/* Combine extents to group */
+	ret = join_extents(donor_list_logical, &donor_group_head);
+	if (ret < 0) {
+		if (mode_flag & DETAIL) {
+			PRINT_FILE_NAME(file);
+			PRINT_ERR_MSG_WITH_ERRNO(NGMSG_FILE_EXTENT);
+		}
+		goto out;
+	}
+
 check_improvement:
 	if (mode_flag & DETAIL) {
 		if (file_frags_start != 1)
@@ -1694,7 +1705,7 @@ check_improvement:
 	}
 
 	/* Defrag the file */
-	ret = call_defrag(fd, donor_fd, file, buf, donor_list_logical);
+	ret = call_defrag(fd, donor_fd, file, buf, donor_group_head);
 
 	/* Count file fragments after defrag and print extents info */
 	if (mode_flag & DETAIL) {
@@ -1734,6 +1745,7 @@ out:
 	free_ext(donor_list_physical);
 	free_ext(donor_list_logical);
 	free_exts_group(orig_group_head);
+	free_exts_group(donor_group_head);
 	return 0;
 }
 
