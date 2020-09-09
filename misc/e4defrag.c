@@ -1536,7 +1536,7 @@ static int file_defrag(const char *file, const struct stat64 *buf,
 	/* Get the count of file's continuous physical region */
 	orig_physical_cnt = get_physical_count(orig_list_physical);
 #ifdef DEBUG
-	printf("DEBUG: orig_physical_cnt = %d\n", orig_physical_cnt);
+	printf("DEBUG: Original continuous fragments = %d\n", orig_physical_cnt);
 #endif
 
 	/* Change list from physical to logical */
@@ -1553,13 +1553,11 @@ static int file_defrag(const char *file, const struct stat64 *buf,
 	/* Count file fragments before defrag */
 	file_frags_start = get_logical_count(orig_list_logical);
 #ifdef DEBUG
-	printf("DEBUG: file_frags_start = %d\n", file_frags_start);
+	printf("DEBUG: Original logical segments = %d\n", file_frags_start);
 #endif
 
 	blk_count = get_file_blocks(orig_list_logical);
-#ifdef DEBUG
-	printf("DEBUG: blk_count = %d\n", blk_count);
-#endif
+
 	if (file_check(fd, buf, file, file_frags_start, blk_count) < 0)
 		goto out;
 
@@ -1573,7 +1571,7 @@ static int file_defrag(const char *file, const struct stat64 *buf,
 
 	best = get_best_count(blk_count);
 #ifdef DEBUG
-	printf("DEBUG: best = %d\n", best);
+	printf("DEBUG: Best possible extents = %d\n", best);
 #endif
 
 	if (file_frags_start <= best)
@@ -1588,10 +1586,6 @@ static int file_defrag(const char *file, const struct stat64 *buf,
 		}
 		goto out;
 	}
-#ifdef DEBUG
-	int file_frags_joined = get_logical_count(orig_list_logical);
-	printf("DEBUG: file_frags_joined = %d\n", file_frags_joined);
-#endif
 
 	/* Create donor inode */
 	memset(tmp_inode_name, 0, PATH_MAX + 8);
@@ -1650,7 +1644,7 @@ static int file_defrag(const char *file, const struct stat64 *buf,
 	/* Calculate donor inode's continuous physical region */
 	donor_physical_cnt = get_physical_count(donor_list_physical);
 #ifdef DEBUG
-	printf("DEBUG: donor_physical_cnt = %d\n", donor_physical_cnt);
+	printf("DEBUG: Target continuous fragments = %d\n", donor_physical_cnt);
 #endif
 
 	/* Change donor extent list from physical to logical */
@@ -1665,7 +1659,7 @@ static int file_defrag(const char *file, const struct stat64 *buf,
 	}
 #ifdef DEBUG
 	int donor_logical_cnt = get_logical_count(donor_list_logical);
-	printf("DEBUG: donor_logical_cnt = %d\n", donor_logical_cnt);
+	printf("DEBUG: Target logical segments = %d\n", donor_logical_cnt);
 #endif
 
 	/* Combine extents to group */
