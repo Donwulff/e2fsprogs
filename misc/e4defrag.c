@@ -111,7 +111,7 @@
  * EXTENT_MAX_COUNT:	the maximum number of extents for exchanging between
  *			kernel-space and user-space per ioctl
  */
-#define EXTENT_MAX_COUNT	32768
+#define EXTENT_MAX_COUNT	512
 
 /* The following macros are error message */
 #define MSG_USAGE		\
