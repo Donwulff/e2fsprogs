@@ -6,9 +6,26 @@ with mergesort from Linux kernel. Large files, especially sparse
 files with a large number of holes, such as DB files or backups 
 synchronized with rsync may lead to tens of thousands of fragments.
 
-Bugs in e4defrag are responsibility of this author, and not Ted Ts'o,
-but in any case use at your own risk and make sure your backups have
-backups.
+	Original code defragments files along the extents of the 
+initial file, one at a time. While this tends to make them contiguous,
+it doesn't reduce the size of the extent tree. Now running defragment 
+along the continuous physical segments of the defragmented file. I'm 
+not sure why this wasn't done originally, so testing before use is 
+warranted. It's working on my tests.
+
+	Extent allocation now also incorporated small holes in sparse 
+files into the extents, because various levels of read-ahead will read 
+over them in any event. Admittedly this partially co-opts kernel 
+extent allocation logic, but helps with backups and range-scans of db 
+files. Kernel defrag IOCTL still preserves holes in sparse files; 
+they're just more likely to be allocated contiguous.
+
+
+	Bugs in e4defrag are responsibility of this author, and not 
+Ted Ts'o, but in any case use at your own risk and make sure your 
+backups have backups.
+
+
 
 Original description follows:
 
