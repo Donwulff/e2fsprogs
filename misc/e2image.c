@@ -52,6 +52,7 @@ extern int optind;
 
 #include "support/nls-enable.h"
 #include "support/plausible.h"
+#include "support/quotaio.h"
 #include "../version.h"
 
 #define QCOW_OFLAG_COPIED     (1ULL << 63)
@@ -192,7 +193,8 @@ static void generic_write(int fd, void *buf, int blocksize, blk64_t block)
 
 		if (block)
 			com_err(program_name, err,
-				_("error writing block %llu"), block);
+				_("error writing block %llu"),
+				(unsigned long long) block);
 		else
 			com_err(program_name, err, "%s",
 				_("error in generic_write()"));
@@ -565,8 +567,10 @@ static void sigint_handler(int unused EXT2FS_ATTR((unused)))
 
 static int print_progress(blk64_t num, blk64_t total)
 {
-	return fprintf(stderr, _("%llu / %llu blocks (%d%%)"), num, total,
-		      calc_percent(num, total));
+	return fprintf(stderr, _("%llu / %llu blocks (%d%%)"),
+		       (unsigned long long) num,
+		       (unsigned long long) total,
+		       calc_percent(num, total));
 }
 
 static void output_meta_data_blocks(ext2_filsys fs, int fd, int flags)
@@ -671,7 +675,8 @@ more_blocks:
 			retval = io_channel_read_blk64(fs->io, blk, 1, buf);
 			if (retval) {
 				com_err(program_name, retval,
-					_("error reading block %llu"), blk);
+					_("error reading block %llu"),
+					(unsigned long long) blk);
 			}
 			total_written++;
 			if (scramble_block_map &&
@@ -726,7 +731,8 @@ more_blocks:
 		fputc('\r', stderr);
 		strftime(buff, 30, "%T", gmtime(&duration));
 		fprintf(stderr, _("Copied %llu / %llu blocks (%d%%) in %s "),
-			total_written, meta_blocks_count,
+			(unsigned long long) total_written,
+			(unsigned long long) meta_blocks_count,
 			calc_percent(total_written, meta_blocks_count), buff);
 		if (duration)
 			fprintf(stderr, _("at %.2f MB/s"),
@@ -892,8 +898,9 @@ static errcode_t initialize_qcow2_image(int fd, ext2_filsys fs,
 	int cluster_bits = get_bits_from_size(fs->blocksize);
 	struct ext2_super_block *sb = fs->super;
 
-	if (fs->blocksize < 1024)
-		return EINVAL;	/* Can never happen, but just in case... */
+	/* Sbould never happen, but just in case... */
+	if (cluster_bits < 0)
+		return EXT2_FILSYS_CORRUPTED;
 
 	/* Allocate header */
 	ret = ext2fs_get_memzero(sizeof(struct ext2_qcow2_hdr), &header);
@@ -1201,7 +1208,8 @@ static void output_qcow2_meta_data_blocks(ext2_filsys fs, int fd)
 			retval = io_channel_read_blk64(fs->io, blk, 1, buf);
 			if (retval) {
 				com_err(program_name, retval,
-					_("error reading block %llu"), blk);
+					_("error reading block %llu"),
+					(unsigned long long) blk);
 				continue;
 			}
 			if (scramble_block_map &&
@@ -1298,7 +1306,7 @@ static void write_raw_image_file(ext2_filsys fs, int fd, int type, int flags,
 	}
 
 	if (superblock) {
-		int j;
+		unsigned int j;
 
 		ext2fs_mark_block_bitmap2(meta_block_map, superblock);
 		meta_blocks_count++;
@@ -1358,9 +1366,12 @@ static void write_raw_image_file(ext2_filsys fs, int fd, int type, int flags,
 		pb.ino = ino;
 		pb.is_dir = LINUX_S_ISDIR(inode.i_mode);
 		if (LINUX_S_ISDIR(inode.i_mode) ||
-		    (LINUX_S_ISLNK(inode.i_mode) &&
-		     ext2fs_inode_has_valid_blocks2(fs, &inode)) ||
-		    ino == fs->super->s_journal_inum) {
+		    LINUX_S_ISLNK(inode.i_mode) ||
+		    ino == fs->super->s_journal_inum ||
+		    ino == quota_type2inum(USRQUOTA, fs->super) ||
+		    ino == quota_type2inum(GRPQUOTA, fs->super) ||
+		    ino == quota_type2inum(PRJQUOTA, fs->super) ||
+		    ino == fs->super->s_orphan_file_inum) {
 			retval = ext2fs_block_iterate3(fs, ino,
 					BLOCK_FLAG_READ_ONLY, block_buf,
 					process_dir_block, &pb);
@@ -1482,7 +1493,8 @@ int main (int argc, char ** argv)
 	ext2_filsys fs;
 	char *image_fn, offset_opt[64];
 	struct ext2_qcow2_hdr *header = NULL;
-	int open_flag = EXT2_FLAG_64BITS | EXT2_FLAG_IGNORE_CSUM_ERRORS;
+	int open_flag = EXT2_FLAG_64BITS | EXT2_FLAG_THREADS |
+		EXT2_FLAG_IGNORE_CSUM_ERRORS;
 	int img_type = 0;
 	int flags = 0;
 	int mount_flags = 0;
@@ -1620,7 +1632,7 @@ int main (int argc, char ** argv)
 			goto skip_device;
 		}
 	}
-	sprintf(offset_opt, "offset=%llu", source_offset);
+	sprintf(offset_opt, "offset=%llu", (unsigned long long) source_offset);
 	retval = ext2fs_open2(device_name, offset_opt, open_flag,
 			      superblock, blocksize, unix_io_manager, &fs);
         if (retval) {

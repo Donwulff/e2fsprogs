@@ -1,4 +1,4 @@
-	This is a fork of version (1.45.6) of the second extended
+	This is a fork of version (1.46.4) of the second extended
 file system management programs with changes to e4defrag.
 
 	In this fork, e4defrag's insertion sort has been replaced
@@ -28,6 +28,10 @@ backups have backups.
 
 
 Original description follows:
+
+
+	This is the new version (1.46.4) of the second extended file
+system management programs.
 
 	From time to time, I release new versions of e2fsprogs, to fix
 bugs and to make the utilities more robust.  You can always find

@@ -138,7 +138,8 @@ static void show_stats(e2fsck_t	ctx)
 			       "%llu/%llu blocks\n"),
 			ctx->device_name, inodes_used, inodes,
 			frag_percent_total / 10, frag_percent_total % 10,
-			blocks_used, blocks);
+			(unsigned long long) blocks_used,
+			(unsigned long long) blocks);
 		return;
 	}
 	profile_get_boolean(ctx->profile, "options", "report_features", 0, 0,
@@ -194,7 +195,8 @@ static void show_stats(e2fsck_t	ctx)
 	log_out(ctx, P_("%12llu block used (%2.2f%%, out of %llu)\n",
 			"%12llu blocks used (%2.2f%%, out of %llu)\n",
 		   blocks_used),
-		blocks_used, 100.0 * blocks_used / blocks, blocks);
+		(unsigned long long) blocks_used, 100.0 * blocks_used / blocks,
+		(unsigned long long) blocks);
 	log_out(ctx, P_("%12u bad block\n", "%12u bad blocks\n",
 			ctx->fs_badblocks_count), ctx->fs_badblocks_count);
 	log_out(ctx, P_("%12u large file\n", "%12u large files\n",
@@ -302,7 +304,7 @@ static int is_on_batt(void)
 	}
 	f = fopen("/proc/apm", "r");
 	if (f) {
-		if (fscanf(f, "%s %s %s %x", tmp, tmp, tmp, &acflag) != 4)
+		if (fscanf(f, "%79s %79s %79s %x", tmp, tmp, tmp, &acflag) != 4)
 			acflag = 1;
 		fclose(f);
 		return (acflag != 1);
@@ -318,7 +320,7 @@ static int is_on_batt(void)
 			f = fopen(fname, "r");
 			if (!f)
 				continue;
-			if (fscanf(f, "%s %s", tmp2, tmp) != 2)
+			if (fscanf(f, "%79s %79s", tmp2, tmp) != 2)
 				tmp[0] = 0;
 			fclose(f);
 			if (strncmp(tmp, "off-line", 8) == 0) {
@@ -444,9 +446,9 @@ static void check_if_skip(e2fsck_t ctx)
 		ctx->device_name,
 		fs->super->s_inodes_count - fs->super->s_free_inodes_count,
 		fs->super->s_inodes_count,
-		ext2fs_blocks_count(fs->super) -
+		(unsigned long long) ext2fs_blocks_count(fs->super) -
 		ext2fs_free_blocks_count(fs->super),
-		ext2fs_blocks_count(fs->super));
+		(unsigned long long) ext2fs_blocks_count(fs->super));
 	next_check = 100000;
 	if (fs->super->s_max_mnt_count > 0) {
 		next_check = fs->super->s_max_mnt_count - fs->super->s_mnt_count;
@@ -753,6 +755,14 @@ static void parse_extended_opts(e2fsck_t ctx, const char *opts)
 			ctx->options |= E2F_OPT_UNSHARE_BLOCKS;
 			ctx->options |= E2F_OPT_FORCE;
 			continue;
+		} else if (strcmp(token, "check_encoding") == 0) {
+			ctx->options |= E2F_OPT_CHECK_ENCODING;
+			continue;
+#ifdef CONFIG_DEVELOPER_FEATURES
+		} else if (strcmp(token, "clear_all_uninit_bits") == 0) {
+			ctx->options |= E2F_OPT_CLEAR_UNINIT;
+			continue;
+#endif
 		} else {
 			fprintf(stderr, _("Unknown extended option: %s\n"),
 				token);
@@ -779,6 +789,7 @@ static void parse_extended_opts(e2fsck_t ctx, const char *opts)
 		fputs("\tbmap2extent\n", stderr);
 		fputs("\tunshare_blocks\n", stderr);
 		fputs("\tfixes_only\n", stderr);
+		fputs("\tcheck_encoding\n", stderr);
 		fputc('\n', stderr);
 		exit(1);
 	}
@@ -812,7 +823,7 @@ static errcode_t PRS(int argc, char *argv[], e2fsck_t *ret_ctx)
 #ifdef CONFIG_JBD_DEBUG
 	char 		*jbd_debug;
 #endif
-	unsigned long long phys_mem_kb;
+	unsigned long long phys_mem_kb, blk;
 
 	retval = e2fsck_allocate_context(&ctx);
 	if (retval)
@@ -913,7 +924,8 @@ static errcode_t PRS(int argc, char *argv[], e2fsck_t *ret_ctx)
 			/* What we do by default, anyway! */
 			break;
 		case 'b':
-			res = sscanf(optarg, "%llu", &ctx->use_superblock);
+			res = sscanf(optarg, "%llu", &blk);
+			ctx->use_superblock = blk;
 			if (res != 1)
 				goto sscanf_err;
 			ctx->flags |= E2F_FLAG_SB_SPECIFIED;
@@ -1389,6 +1401,7 @@ int main (int argc, char *argv[])
 	__u32 features[3];
 	char *cp;
 	enum quota_type qtype;
+	struct ext2fs_journal_params jparams;
 
 	clear_problem_context(&pctx);
 	sigcatcher_setup();
@@ -1439,7 +1452,7 @@ int main (int argc, char *argv[])
 		fputs("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n",
 		      ctx->problem_logf);
 		fprintf(ctx->problem_logf, "<problem_log time=\"%lu\">\n",
-			ctx->now);
+			(unsigned long) ctx->now);
 		fprintf(ctx->problem_logf, "<invocation prog=\"%s\"",
 			argv[0]);
 		for (i = 1; i < argc; i++)
@@ -1469,7 +1482,7 @@ int main (int argc, char *argv[])
 	}
 	ctx->superblock = ctx->use_superblock;
 
-	flags = EXT2_FLAG_SKIP_MMP;
+	flags = EXT2_FLAG_SKIP_MMP | EXT2_FLAG_THREADS;
 restart:
 #ifdef CONFIG_TESTIO_DEBUG
 	if (getenv("TEST_IO_FLAGS") || getenv("TEST_IO_BLOCK")) {
@@ -1693,7 +1706,7 @@ failure:
 	 * or informational messages to the user.
 	 */
 	if (ctx->device_name == 0 && sb->s_volume_name[0])
-		ctx->device_name = string_copy(ctx, sb->s_volume_name,
+		ctx->device_name = string_copy(ctx, (char *) sb->s_volume_name,
 					       sizeof(sb->s_volume_name));
 
 	if (ctx->device_name == 0)
@@ -1882,9 +1895,15 @@ print_unsupp_features:
 	/*
 	 * Save the journal size in megabytes.
 	 * Try and use the journal size from the backup else let e2fsck
-	 * find the default journal size.
+	 * find the default journal size. If fast commit feature is enabled,
+	 * it is not clear how many of the journal blocks were fast commit
+	 * blocks. So, ignore the size of journal found in backup.
+	 *
+	 * TODO: Add a new backup type that captures fast commit info as
+	 * well.
 	 */
-	if (sb->s_jnl_backup_type == EXT3_JNL_BACKUP_BLOCKS)
+	if (sb->s_jnl_backup_type == EXT3_JNL_BACKUP_BLOCKS &&
+		!ext2fs_has_feature_fast_commit(sb))
 		journal_size = (sb->s_jnl_blocks[15] << (32 - 20)) |
 			       (sb->s_jnl_blocks[16] >> 20);
 	else
@@ -1906,20 +1925,16 @@ print_unsupp_features:
 	if (!ctx->invalid_bitmaps &&
 	    (ctx->flags & E2F_FLAG_JOURNAL_INODE)) {
 		if (fix_problem(ctx, PR_6_RECREATE_JOURNAL, &pctx)) {
-			if (journal_size < 1024)
-				journal_size = ext2fs_default_journal_size(ext2fs_blocks_count(fs->super));
-			if (journal_size < 0) {
-				ext2fs_clear_feature_journal(fs->super);
-				fs->flags &= ~EXT2_FLAG_MASTER_SB_ONLY;
-				log_out(ctx, "%s: Couldn't determine "
-					"journal size\n", ctx->program_name);
-				goto no_journal;
+			if (journal_size < 1024) {
+				ext2fs_get_journal_params(&jparams, fs);
+			} else {
+				jparams.num_journal_blocks = journal_size;
+				jparams.num_fc_blocks = 0;
 			}
 			log_out(ctx, _("Creating journal (%d blocks): "),
-			       journal_size);
+			       jparams.num_journal_blocks);
 			fflush(stdout);
-			retval = ext2fs_add_journal_inode(fs,
-							  journal_size, 0);
+			retval = ext2fs_add_journal_inode3(fs, &jparams, ~0ULL, 0);
 			if (retval) {
 				log_out(ctx, "%s: while trying to create "
 					"journal\n", error_message(retval));
@@ -1930,15 +1945,82 @@ print_unsupp_features:
 				_("\n*** journal has been regenerated ***\n"));
 		}
 	}
-no_journal:
 
+no_journal:
 	if (run_result & E2F_FLAG_ABORT) {
 		fatal_error(ctx, _("aborted"));
 	} else if (run_result & E2F_FLAG_CANCEL) {
 		log_out(ctx, _("%s: e2fsck canceled.\n"), ctx->device_name ?
 			ctx->device_name : ctx->filesystem_name);
 		exit_value |= FSCK_CANCELED;
-	} else if (ctx->qctx && !ctx->invalid_bitmaps) {
+		goto cleanup;
+	}
+
+	if (ext2fs_has_feature_orphan_file(fs->super)) {
+		int ret;
+
+		/* No point in orphan file without a journal... */
+		if (!ext2fs_has_feature_journal(fs->super) &&
+		    fix_problem(ctx, PR_6_ORPHAN_FILE_WITHOUT_JOURNAL, &pctx)) {
+			retval = ext2fs_truncate_orphan_file(fs);
+			if (retval) {
+				/* Huh, failed to delete file */
+				fix_problem(ctx, PR_6_ORPHAN_FILE_TRUNC_FAILED,
+					    &pctx);
+				goto check_quotas;
+			}
+			ext2fs_clear_feature_orphan_file(fs->super);
+			ext2fs_mark_super_dirty(fs);
+			goto check_quotas;
+		}
+		ret = check_init_orphan_file(ctx);
+		if (ret == 2 ||
+		    (ret == 0 && ext2fs_has_feature_orphan_present(fs->super) &&
+		     fix_problem(ctx, PR_6_ORPHAN_PRESENT_CLEAN_FILE, &pctx))) {
+			ext2fs_clear_feature_orphan_present(fs->super);
+			ext2fs_mark_super_dirty(fs);
+		} else if (ret == 1 &&
+		    fix_problem(ctx, PR_6_ORPHAN_FILE_CORRUPTED, &pctx)) {
+			int orphan_file_blocks;
+
+			if (ctx->invalid_bitmaps) {
+				fix_problem(ctx,
+					    PR_6_ORPHAN_FILE_BITMAP_INVALID,
+					    &pctx);
+				goto check_quotas;
+			}
+
+			retval = ext2fs_truncate_orphan_file(fs);
+			if (retval) {
+				/* Huh, failed to truncate file */
+				fix_problem(ctx, PR_6_ORPHAN_FILE_TRUNC_FAILED,
+					    &pctx);
+				goto check_quotas;
+			}
+
+			orphan_file_blocks =
+				ext2fs_default_orphan_file_blocks(fs);
+			log_out(ctx, _("Creating orphan file (%d blocks): "),
+				orphan_file_blocks);
+			fflush(stdout);
+			retval = ext2fs_create_orphan_file(fs,
+							   orphan_file_blocks);
+			if (retval) {
+				log_out(ctx, "%s: while trying to create "
+					"orphan file\n", error_message(retval));
+				fix_problem(ctx, PR_6_ORPHAN_FILE_CREATE_FAILED,
+					    &pctx);
+				goto check_quotas;
+			}
+			log_out(ctx, "%s", _(" Done.\n"));
+		}
+	} else if (ext2fs_has_feature_orphan_present(fs->super) &&
+		   fix_problem(ctx, PR_6_ORPHAN_PRESENT_NO_FILE, &pctx)) {
+			ext2fs_clear_feature_orphan_present(fs->super);
+			ext2fs_mark_super_dirty(fs);
+	}
+check_quotas:
+	if (ctx->qctx && !ctx->invalid_bitmaps) {
 		int needs_writeout;
 
 		for (qtype = 0; qtype < MAXQUOTAS; qtype++) {
@@ -1973,6 +2055,7 @@ no_journal:
 		goto restart;
 	}
 
+cleanup:
 #ifdef MTRACE
 	mtrace_print("Cleanup");
 #endif

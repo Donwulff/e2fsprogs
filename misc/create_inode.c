@@ -166,6 +166,13 @@ static errcode_t set_inode_xattr(ext2_filsys fs, ext2_ino_t ino,
 		return retval;
 	}
 
+	retval = ext2fs_xattrs_read(handle);
+	if (retval) {
+		com_err(__func__, retval,
+			_("while reading xattrs for inode %u"), ino);
+		goto out;
+	}
+
 	retval = ext2fs_get_mem(size, &list);
 	if (retval) {
 		com_err(__func__, retval, _("while allocating memory"));
@@ -227,7 +234,6 @@ static errcode_t set_inode_xattr(ext2_filsys fs, ext2_ino_t ino,
 		retval = retval ? retval : close_retval;
 	}
 	return retval;
-	return 0;
 }
 #else /* HAVE_LLISTXATTR */
 static errcode_t set_inode_xattr(ext2_filsys fs EXT2FS_ATTR((unused)),
@@ -601,7 +607,7 @@ out:
 	return err;
 }
 
-static int is_hardlink(struct hdlinks_s *hdlinks, dev_t dev, ext2_ino_t ino)
+static int is_hardlink(struct hdlinks_s *hdlinks, dev_t dev, ino_t ino)
 {
 	int i;
 
@@ -619,9 +625,10 @@ errcode_t do_write_internal(ext2_filsys fs, ext2_ino_t cwd, const char *src,
 {
 	int		fd;
 	struct stat	statbuf;
-	ext2_ino_t	newfile;
+	ext2_ino_t	newfile, parent_ino;
 	errcode_t	retval;
 	struct ext2_inode inode;
+	char		*cp;
 
 	fd = ext2fs_open_file(src, O_RDONLY, 0);
 	if (fd < 0) {
@@ -635,25 +642,37 @@ errcode_t do_write_internal(ext2_filsys fs, ext2_ino_t cwd, const char *src,
 		goto out;
 	}
 
-	retval = ext2fs_namei(fs, root, cwd, dest, &newfile);
+	cp = strrchr(dest, '/');
+	if (cp) {
+		*cp = 0;
+		retval = ext2fs_namei(fs, root, cwd, dest, &parent_ino);
+		if (retval) {
+			com_err(dest, retval, _("while looking up \"%s\""),
+				dest);
+			goto out;
+		}
+		dest = cp+1;
+	} else
+		parent_ino = cwd;
+
+	retval = ext2fs_namei(fs, root, parent_ino, dest, &newfile);
 	if (retval == 0) {
 		retval = EXT2_ET_FILE_EXISTS;
 		goto out;
 	}
 
-	retval = ext2fs_new_inode(fs, cwd, 010755, 0, &newfile);
+	retval = ext2fs_new_inode(fs, parent_ino, 010755, 0, &newfile);
 	if (retval)
 		goto out;
 #ifdef DEBUGFS
 	printf("Allocated inode: %u\n", newfile);
 #endif
-	retval = ext2fs_link(fs, cwd, dest, newfile,
-				EXT2_FT_REG_FILE);
+	retval = ext2fs_link(fs, parent_ino, dest, newfile, EXT2_FT_REG_FILE);
 	if (retval == EXT2_ET_DIR_NO_SPACE) {
-		retval = ext2fs_expand_dir(fs, cwd);
+		retval = ext2fs_expand_dir(fs, parent_ino);
 		if (retval)
 			goto out;
-		retval = ext2fs_link(fs, cwd, dest, newfile,
+		retval = ext2fs_link(fs, parent_ino, dest, newfile,
 					EXT2_FT_REG_FILE);
 	}
 	if (retval)
@@ -752,6 +771,8 @@ static int scandir(const char *dir_name, struct dirent ***name_list,
 		}
 		// add the copy of dirent to the list
 		temp_list[num_dent] = (struct dirent*)malloc((dent->d_reclen + 3) & ~3);
+		if (!temp_list[num_dent])
+			goto out;
 		memcpy(temp_list[num_dent], dent, dent->d_reclen);
 		num_dent++;
 	}
@@ -1050,9 +1071,17 @@ errcode_t populate_fs2(ext2_filsys fs, ext2_ino_t parent_ino,
 	file_info.path_max_len = 255;
 	file_info.path = calloc(file_info.path_max_len, 1);
 
+	retval = set_inode_xattr(fs, root, source_dir);
+	if (retval) {
+		com_err(__func__, retval,
+			_("while copying xattrs on root directory"));
+		goto out;
+	}
+
 	retval = __populate_fs(fs, parent_ino, source_dir, root, &hdlinks,
 			       &file_info, fs_callbacks);
 
+out:
 	free(file_info.path);
 	free(hdlinks.hdl);
 	return retval;

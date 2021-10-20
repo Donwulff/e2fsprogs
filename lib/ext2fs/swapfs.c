@@ -120,7 +120,7 @@ void ext2fs_swap_super(struct ext2_super_block * sb)
 	/* sb->s_mount_opts is __u8 and does not need swabbing */
 	sb->s_usr_quota_inum = ext2fs_swab32(sb->s_usr_quota_inum);
 	sb->s_grp_quota_inum = ext2fs_swab32(sb->s_grp_quota_inum);
-	sb->s_overhead_blocks = ext2fs_swab32(sb->s_overhead_blocks);
+	sb->s_overhead_clusters = ext2fs_swab32(sb->s_overhead_clusters);
 	sb->s_backup_bgs[0] = ext2fs_swab32(sb->s_backup_bgs[0]);
 	sb->s_backup_bgs[1] = ext2fs_swab32(sb->s_backup_bgs[1]);
 	/* sb->s_encrypt_algos is __u8 and does not need swabbing */
@@ -131,8 +131,9 @@ void ext2fs_swap_super(struct ext2_super_block * sb)
 	/* s_*_time_hi are __u8 and does not need swabbing */
 	sb->s_encoding = ext2fs_swab16(sb->s_encoding);
 	sb->s_encoding_flags = ext2fs_swab16(sb->s_encoding_flags);
+	sb->s_orphan_file_inum = ext2fs_swab32(sb->s_orphan_file_inum);
 	/* catch when new fields are used from s_reserved */
-	EXT2FS_BUILD_BUG_ON(sizeof(sb->s_reserved) != 95 * sizeof(__le32));
+	EXT2FS_BUILD_BUG_ON(sizeof(sb->s_reserved) != 94 * sizeof(__le32));
 	sb->s_checksum = ext2fs_swab32(sb->s_checksum);
 }
 
@@ -245,7 +246,7 @@ void ext2fs_swap_inode_full(ext2_filsys fs, struct ext2_inode_large *t,
 {
 	unsigned i, extra_isize, attr_magic;
 	int has_extents, has_inline_data, islnk, fast_symlink;
-	int inode_size;
+	unsigned int inode_size;
 	__u32 *eaf, *eat;
 
 	/*
@@ -456,12 +457,11 @@ errcode_t ext2fs_dirent_swab_out2(ext2_filsys fs, char *buf,
 {
 	errcode_t	retval;
 	char		*p, *end;
-	unsigned int	rec_len, left;
+	unsigned int	rec_len;
 	struct ext2_dir_entry *dirent;
 
 	p = buf;
 	end = buf + size;
-	left = size;
 	while (p < end) {
 		dirent = (struct ext2_dir_entry *) p;
 		retval = ext2fs_get_rec_len(fs, dirent, &rec_len);
