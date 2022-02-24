@@ -531,6 +531,7 @@ typedef struct ext2_struct_inode_scan *ext2_inode_scan;
 #define EXT2_MF_READONLY	4
 #define EXT2_MF_SWAP		8
 #define EXT2_MF_BUSY		16
+#define EXT2_MF_EXTFS		32
 
 /*
  * Ext2/linux mode flags.  We define them here so that we don't need
@@ -1290,6 +1291,8 @@ extern errcode_t ext2fs_adjust_ea_refcount3(ext2_filsys fs, blk64_t blk,
 					   ext2_ino_t inum);
 errcode_t ext2fs_xattrs_write(struct ext2_xattr_handle *handle);
 errcode_t ext2fs_xattrs_read(struct ext2_xattr_handle *handle);
+errcode_t ext2fs_xattrs_read_inode(struct ext2_xattr_handle *handle,
+				   struct ext2_inode_large *inode);
 errcode_t ext2fs_xattrs_iterate(struct ext2_xattr_handle *h,
 				int (*func)(char *name, char *value,
 					    size_t value_len, void *data),
