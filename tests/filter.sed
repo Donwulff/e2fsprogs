@@ -20,6 +20,7 @@ s/\\015//g
 /^Maximum mount count:/d
 /^Next check after:/d
 /^Suggestion:/d
+/security.selinux/d
 /Reserved blocks uid:/s/ (user .*)//
 /Reserved blocks gid:/s/ (group .*)//
 /whichever comes first/d
@@ -27,6 +28,7 @@ s/\\015//g
 s/, csum 0x\([0-9a-f]*\)//g
 s/ csum 0x\([0-9a-f]*\)//g
 /^Checksum:/d
+/^Checksum seed:/d
 s/while trying to open [^ ]*/while trying to open test.img/
 s/he filesystem on [^ ]* /he filesystem on test.img /
 s/^[^ ]* contains a \([a-z]*\) file system /test.img contains a \1 file system /

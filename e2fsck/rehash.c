@@ -89,9 +89,9 @@ struct fill_dir_struct {
 };
 
 struct hash_entry {
-	ext2_dirhash_t	hash;
-	ext2_dirhash_t	minor_hash;
-	ino_t		ino;
+	ext2_dirhash_t		hash;
+	ext2_dirhash_t		minor_hash;
+	ext2_ino_t		ino;
 	struct ext2_dir_entry	*dir;
 };
 
@@ -414,6 +414,8 @@ static void mutate_name(char *str, unsigned int *len)
 			l += 2;
 		else
 			l = (l+3) & ~3;
+		if (l > 255)
+			l = 255;
 		str[l-2] = '~';
 		str[l-1] = '0';
 		*len = l;
