@@ -1,3 +1,9 @@
+// Gives some extra output for testing
+//#define DEBUG
+// Shake files around even if already optimal (good for alignment)
+//#define ALWAYS
+// Ignore file-locks eg. db; doesn't seem to cause problems, but ymmw
+//#define NOLOCK
 /*
  * e4defrag.c - ext4 filesystem defragmenter
  *
@@ -535,6 +541,7 @@ static int file_check(int fd, const struct stat64 *buf, const char *file,
 		return -1;
 	}
 
+#ifndef NOLOCK
 	/* Lock status */
 	if (fcntl(fd, F_GETLK, &lock) < 0) {
 		if (mode_flag & DETAIL) {
@@ -550,6 +557,7 @@ static int file_check(int fd, const struct stat64 *buf, const char *file,
 		}
 		return -1;
 	}
+#endif
 
 	return 0;
 }
@@ -735,7 +743,7 @@ static int join_extents(struct fiemap_extent_list *ext_list_head,
 		 */
 		__u64 hole_len = ext_list_tmp->data.logical -
 			(ext_list_tmp->prev->data.logical + ext_list_tmp->prev->data.len);
-		if ((hole_len >= 8) || (hole_len < 0)) {
+		if ((hole_len >= 8) || (hole_len < 0) /* || (ext_list_head->next == ext_list_tmp->next)*/) {
 #ifdef DEBUG
 			printf("DEBUG: break at prev: %d + %d, this: %d + %d (%d blocks)\n", ext_list_tmp->prev->data.logical,
 				ext_list_tmp->prev->data.len, ext_list_tmp->data.logical, ext_list_tmp->data.len,
@@ -1373,6 +1381,15 @@ static int call_defrag(int fd, int donor_fd, const char *file,
 		/* Logical offset of orig and donor should be same */
 		move_data.donor_start = move_data.orig_start;
 		move_data.len = ext_list_tmp->len;
+		/* Make sure we don't exceed the donor file length */
+		ext2_loff_t file_blocks = (buf->st_size - 1) / buf->st_blksize + 1;
+		ext2_loff_t max_blocks = file_blocks - move_data.orig_start;
+		if (move_data.len > max_blocks) {
+			move_data.len = max_blocks;
+#ifdef DEBUG
+			fprintf(stderr, "len: %lu, size: %lu, blocks: %lu, start: %lu\n", move_data.len, buf->st_size, buf->st_blocks, move_data.orig_start);
+#endif
+		}
 		move_data.moved_len = 0;
 
 		ret = page_in_core(fd, move_data, &vec, &page_num);
@@ -1573,8 +1590,11 @@ static int file_defrag(const char *file, const struct stat64 *buf,
 	printf("DEBUG: Best possible extents = %d\n", best);
 #endif
 
+#ifndef ALWAYS
+	/* This would skip defragment if no improvement not possible */
 	if (file_frags_start <= best)
 		goto check_improvement;
+#endif
 
 	/* Combine extents to group */
 	ret = join_extents(orig_list_logical, &orig_group_head);
@@ -1616,9 +1636,17 @@ static int file_defrag(const char *file, const struct stat64 *buf,
 	/* Allocate space for donor inode */
 	orig_group_tmp = orig_group_head;
 	do {
+		ext2_loff_t padded_len = (ext2_loff_t)orig_group_tmp->len * block_size;
+		/* Round up if we have more than one stripe; kernel should align and trim us */
+		if(buf->st_blocks > 16) {
+			padded_len = (padded_len / 65536 + 1) * 65536;
+		}
+#ifdef DEBUG
+		fprintf(stderr, "Allocate: %lu\n", padded_len);
+#endif
 		ret = fallocate(donor_fd, 0,
 		  (ext2_loff_t)orig_group_tmp->start->data.logical * block_size,
-		  (ext2_loff_t)orig_group_tmp->len * block_size);
+		  padded_len);
 		if (ret < 0) {
 			if (mode_flag & DETAIL) {
 				PRINT_FILE_NAME(file);
@@ -1679,8 +1707,13 @@ check_improvement:
 		extents_before_defrag += file_frags_start;
 	}
 
+#ifdef ALWAYS
+	if (file_frags_start < best ||
+			orig_physical_cnt < donor_physical_cnt) {
+#else
 	if (file_frags_start <= best ||
 			orig_physical_cnt <= donor_physical_cnt) {
+#endif
 		printf("\033[79;0H\033[K[%u/%u]%s:\t%3d%%",
 			defraged_file_count, total_count, file, 100);
 		if (mode_flag & DETAIL)
