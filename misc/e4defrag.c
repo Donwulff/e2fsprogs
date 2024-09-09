@@ -4,6 +4,8 @@
 //#define ALWAYS
 // Ignore file-locks eg. db; doesn't seem to cause problems, but ymmw
 //#define NOLOCK
+// Align allocations to RAID, hard-coded to 64k for now
+//#define ALIGN
 /*
  * e4defrag.c - ext4 filesystem defragmenter
  *
@@ -1591,7 +1593,7 @@ static int file_defrag(const char *file, const struct stat64 *buf,
 #endif
 
 #ifndef ALWAYS
-	/* This would skip defragment if no improvement not possible */
+	/* This would skip defragment if no improvement possible */
 	if (file_frags_start <= best)
 		goto check_improvement;
 #endif
@@ -1636,17 +1638,23 @@ static int file_defrag(const char *file, const struct stat64 *buf,
 	/* Allocate space for donor inode */
 	orig_group_tmp = orig_group_head;
 	do {
+#ifdef ALIGN
 		ext2_loff_t padded_len = (ext2_loff_t)orig_group_tmp->len * block_size;
-		/* Round up if we have more than one stripe; kernel should align and trim us */
+		/* Round up if we have more than one unit; kernel should align and trim us */
 		if(buf->st_blocks > 16) {
-			padded_len = (padded_len / 65536 + 1) * 65536;
+			padded_len = ((padded_len - 1) / 65536 + 1) * 65536;
 		}
+#endif
 #ifdef DEBUG
 		fprintf(stderr, "Allocate: %lu\n", padded_len);
 #endif
 		ret = fallocate(donor_fd, 0,
 		  (ext2_loff_t)orig_group_tmp->start->data.logical * block_size,
+#ifdef ALIGN
 		  padded_len);
+#else
+		  (ext2_loff_t)orig_group_tmp->len * block_size);
+#endif
 		if (ret < 0) {
 			if (mode_flag & DETAIL) {
 				PRINT_FILE_NAME(file);
