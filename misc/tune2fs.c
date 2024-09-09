@@ -470,7 +470,8 @@ static int check_fsck_needed(ext2_filsys fs, const char *prompt)
 	/* Refuse to modify anything but a freshly checked valid filesystem. */
 	if (!(fs->super->s_state & EXT2_VALID_FS) ||
 	    (fs->super->s_state & EXT2_ERROR_FS) ||
-	    (fs->super->s_lastcheck < fs->super->s_mtime)) {
+	    (ext2fs_get_tstamp(fs->super, s_lastcheck) <
+	     ext2fs_get_tstamp(fs->super, s_mtime))) {
 		puts(_(fsck_explain));
 		puts(_(please_fsck));
 		if (mount_flags & EXT2_MF_READONLY)
@@ -524,7 +525,8 @@ static void convert_64bit(ext2_filsys fs, int direction)
 	if (!fsck_requested &&
 	    ((fs->super->s_state & EXT2_ERROR_FS) ||
 	     !(fs->super->s_state & EXT2_VALID_FS) ||
-	     fs->super->s_lastcheck < fs->super->s_mtime))
+	     ext2fs_get_tstamp(fs->super, s_lastcheck) <
+	     ext2fs_get_tstamp(fs->super, s_mtime)))
 		request_fsck_afterwards(fs);
 	if (fsck_requested)
 		fprintf(stderr, _("After running e2fsck, please run `resize2fs %s %s"),
@@ -3095,7 +3097,7 @@ static int handle_fslabel(int setlabel)
 	errcode_t ret;
 	int mnt_flags, fd;
 	char label[FSLABEL_MAX];
-	int maxlen = FSLABEL_MAX - 1;
+	unsigned int maxlen = FSLABEL_MAX - 1;
 	char mntpt[PATH_MAX + 1];
 
 	ret = ext2fs_check_mount_point(device_name, &mnt_flags,
@@ -3443,7 +3445,7 @@ _("Warning: The journal is dirty. You may wish to replay the journal like:\n\n"
 		goto closefs;
 	}
 	if (T_flag) {
-		sb->s_lastcheck = last_check_time;
+		ext2fs_set_tstamp(sb, s_lastcheck, last_check_time);
 		ext2fs_mark_super_dirty(fs);
 		printf(_("Setting time filesystem last checked to %s\n"),
 		       ctime(&last_check_time));
@@ -3519,9 +3521,9 @@ _("Warning: The journal is dirty. You may wish to replay the journal like:\n\n"
 	}
 
 	if (Q_flag) {
-		if (mount_flags & EXT2_MF_MOUNTED) {
+		if (mount_flags & (EXT2_MF_BUSY | EXT2_MF_MOUNTED)) {
 			fputs(_("The quota feature may only be changed when "
-				"the filesystem is unmounted.\n"), stderr);
+				"the filesystem is unmounted and not in use.\n"), stderr);
 			rc = 1;
 			goto closefs;
 		}
@@ -3672,10 +3674,10 @@ _("Warning: The journal is dirty. You may wish to replay the journal like:\n\n"
 	}
 
 	if (I_flag) {
-		if (mount_flags & EXT2_MF_MOUNTED) {
+		if (mount_flags & (EXT2_MF_BUSY | EXT2_MF_MOUNTED)) {
 			fputs(_("The inode size may only be "
 				"changed when the filesystem is "
-				"unmounted.\n"), stderr);
+				"unmounted and not in use.\n"), stderr);
 			rc = 1;
 			goto closefs;
 		}
