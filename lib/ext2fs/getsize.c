@@ -309,7 +309,7 @@ int main(int argc, char **argv)
 		exit(1);
 	}
 	printf("Device %s has %llu 1k blocks.\n", argv[1],
-	       (unsigned long long) locks);
+	       (unsigned long long) blocks);
 	exit(0);
 }
 #endif

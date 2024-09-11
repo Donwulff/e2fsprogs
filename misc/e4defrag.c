@@ -1,7 +1,7 @@
 // Gives some extra output for testing
 //#define DEBUG
 // Shake files around even if already optimal (good for alignment)
-//#define ALWAYS
+//#define SHAKE
 // Ignore file-locks eg. db; doesn't seem to cause problems, but ymmw
 //#define NOLOCK
 // Align allocations to RAID, hard-coded to 64k for now
@@ -14,6 +14,8 @@
  * Author: Akira Fujita	<a-fujita@rs.jp.nec.com>
  *         Takashi Sato	<t-sato@yk.jp.nec.com>
  */
+
+//#define DEBUG
 
 #ifndef _LARGEFILE_SOURCE
 #define _LARGEFILE_SOURCE
@@ -29,6 +31,7 @@
 
 #include "config.h"
 #include "support/list_sort.h"
+#include <assert.h>
 #include <ctype.h>
 #include <dirent.h>
 #include <endian.h>
@@ -740,16 +743,18 @@ static int join_extents(struct fiemap_extent_list *ext_list_head,
 	do {
 		struct fiemap_extent_group	*ext_group_tmp = NULL;
 
-		/* This extent and previous extent are not continuous,
-		 * so, all previous extents are treated as an extent group.
-		 */
+		/* Create a new extent group at large gaps and end of file */
 		__u64 hole_len = ext_list_tmp->data.logical -
 			(ext_list_tmp->prev->data.logical + ext_list_tmp->prev->data.len);
-		if ((hole_len >= 8) || (hole_len < 0) /* || (ext_list_head->next == ext_list_tmp->next)*/) {
+		if ((hole_len >= 8) || (hole_len < 0)) {
 #ifdef DEBUG
-			printf("DEBUG: break at prev: %d + %d, this: %d + %d (%d blocks)\n", ext_list_tmp->prev->data.logical,
-				ext_list_tmp->prev->data.len, ext_list_tmp->data.logical, ext_list_tmp->data.len,
-				hole_len);
+			printf("DEBUG: break at prev: %lld + %lld, this: %lld + %lld (%lld blocks)\n",
+			       ext_list_tmp->prev->data.logical,
+			       ext_list_tmp->prev->data.len,
+			       ext_list_tmp->data.logical,
+			       ext_list_tmp->data.len,
+			       hole_len);
+			assert(hole_len >= 0 || ext_list_tmp->next == ext_list_head->next);
 #endif
 			ext_group_tmp =
 				malloc(sizeof(struct fiemap_extent_group));
@@ -1012,7 +1017,7 @@ static void free_ext(struct fiemap_extent_list *ext_list_head)
 	int count=0;
 
 	if (ext_list_head == NULL) {
-#ifdef DEBUG
+#ifdef DEBUG2
 		printf("DEBUG: Freed no extents.\n");
 #endif
 		return;
@@ -1027,7 +1032,7 @@ static void free_ext(struct fiemap_extent_list *ext_list_head)
 		count++;
 	}
 	free(ext_list_head);
-#ifdef DEBUG
+#ifdef DEBUG2
 	printf("DEBUG: Freed %d extents.\n", ++count);
 #endif
 }
@@ -1375,7 +1380,7 @@ static int call_defrag(int fd, int donor_fd, const char *file,
 	move_data.donor_fd = donor_fd;
 
 	/* Print defrag progress */
-	print_progress(file, start, buf->st_size);
+	print_progress(file, start, buf->st_blocks);
 
 	ext_list_tmp = ext_list_head;
 	do {
@@ -1383,15 +1388,19 @@ static int call_defrag(int fd, int donor_fd, const char *file,
 		/* Logical offset of orig and donor should be same */
 		move_data.donor_start = move_data.orig_start;
 		move_data.len = ext_list_tmp->len;
+#ifdef DEBUG
 		/* Make sure we don't exceed the donor file length */
-		ext2_loff_t file_blocks = (buf->st_size - 1) / buf->st_blksize + 1;
+		ext2_loff_t file_blocks = (buf->st_blocks * 512 - 1) / buf->st_blksize + 1;
 		ext2_loff_t max_blocks = file_blocks - move_data.orig_start;
 		if (move_data.len > max_blocks) {
-			move_data.len = max_blocks;
-#ifdef DEBUG
-			fprintf(stderr, "len: %lu, size: %lu, blocks: %lu, start: %lu\n", move_data.len, buf->st_size, buf->st_blocks, move_data.orig_start);
-#endif
+			fprintf(stderr, "\nmove_data.len: %llu, size: %lu, blocks: %lu, start: %llu, max_blocks: %lli\n",
+				move_data.len,
+				buf->st_size,
+				buf->st_blocks,
+				move_data.orig_start,
+				max_blocks);
 		}
+#endif
 		move_data.moved_len = 0;
 
 		ret = page_in_core(fd, move_data, &vec, &page_num);
@@ -1409,6 +1418,13 @@ static int call_defrag(int fd, int donor_fd, const char *file,
 		/* EXT4_IOC_MOVE_EXT */
 		defraged_ret =
 			ioctl(fd, EXT4_IOC_MOVE_EXT, &move_data);
+#ifdef DEBUG
+		fprintf(stderr, "EXT4_IOC_MOVE_EXT: move_data.len: %llu, orig: %llu, donor: %llu, moved: %llu\n",
+			move_data.len,
+			move_data.orig_start,
+			move_data.donor_start,
+			move_data.moved_len);
+#endif
 
 		/* Free pages */
 		ret = defrag_fadvise(fd, move_data, vec, page_num);
@@ -1441,17 +1457,20 @@ static int call_defrag(int fd, int donor_fd, const char *file,
 			}
 			return -1;
 		}
-		/* Adjust logical offset for next ioctl */
+		/* Adjust logical offset for next ioctl
+		 * syscall returns the number of blocks actually moved,
+		 * which excludes holes in sparse files.
+		 */
 		move_data.orig_start += move_data.moved_len;
 		move_data.donor_start = move_data.orig_start;
 
 		start = move_data.orig_start * buf->st_blksize;
 
 		/* Print defrag progress */
-		print_progress(file, start, buf->st_size);
+		print_progress(file, start, buf->st_blocks);
 
 		/* End of file */
-		if (start >= buf->st_size)
+		if (start >= buf->st_blocks)
 			break;
 
 		ext_list_tmp = ext_list_tmp->next;
@@ -1592,7 +1611,7 @@ static int file_defrag(const char *file, const struct stat64 *buf,
 	printf("DEBUG: Best possible extents = %d\n", best);
 #endif
 
-#ifndef ALWAYS
+#ifndef SHAKE
 	/* This would skip defragment if no improvement possible */
 	if (file_frags_start <= best)
 		goto check_improvement;
@@ -1640,13 +1659,15 @@ static int file_defrag(const char *file, const struct stat64 *buf,
 	do {
 #ifdef ALIGN
 		ext2_loff_t padded_len = (ext2_loff_t)orig_group_tmp->len * block_size;
-		/* Round up if we have more than one unit; kernel should align and trim us */
-		if(buf->st_blocks > 16) {
+		/* Round up if we have more than one unit; kernel should align and trim us
+		 * Don't pad last group for now, because we'll run out of source file data
+		 */
+		if(buf->st_blocks > 16 && orig_group_tmp->next != orig_group_head) {
 			padded_len = ((padded_len - 1) / 65536 + 1) * 65536;
 		}
 #endif
 #ifdef DEBUG
-		fprintf(stderr, "Allocate: %lu\n", padded_len);
+		fprintf(stderr, "Allocate: %llu\n", padded_len);
 #endif
 		ret = fallocate(donor_fd, 0,
 		  (ext2_loff_t)orig_group_tmp->start->data.logical * block_size,
@@ -1715,7 +1736,7 @@ check_improvement:
 		extents_before_defrag += file_frags_start;
 	}
 
-#ifdef ALWAYS
+#ifdef SHAKE
 	if (file_frags_start < best ||
 			orig_physical_cnt < donor_physical_cnt) {
 #else
@@ -1725,10 +1746,10 @@ check_improvement:
 		printf("\033[79;0H\033[K[%u/%u]%s:\t%3d%%",
 			defraged_file_count, total_count, file, 100);
 		if (mode_flag & DETAIL)
-			printf("  extents: %d -> %d",
-				file_frags_start, file_frags_start);
+			printf("  extents: %d -> %d (%d)",
+				file_frags_start, file_frags_start, best);
 
-		printf("\t[ OK ]\n");
+		printf("\t[ NOT ]\n");
 		succeed_cnt++;
 
 		if (file_frags_start != 1)
@@ -1758,15 +1779,15 @@ check_improvement:
 		if (ret < 0)
 			goto out;
 
-		printf("  extents: %d -> %d",
-			file_frags_start, file_frags_end);
+		printf("  extents: %d -> %d (%d)",
+			file_frags_start, file_frags_end, best);
 		fflush(stdout);
 	}
 
 	if (ret < 0)
 		goto out;
 
-	printf("\t[ OK ]\n");
+	printf("\t[ TRY ]\n");
 	fflush(stdout);
 	succeed_cnt++;
 
