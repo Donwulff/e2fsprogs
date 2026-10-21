@@ -1,26 +1,19 @@
-	This is a fork of version (1.47.3) of the second extended
-file system management programs with changes to e4defrag.
+	This is the new version (1.47.3) of the second extended file
+system management programs.
 
-	In this fork, e4defrag's insertion sort has been replaced
-with mergesort from Linux kernel. Large files, especially sparse
-files with a large number of holes, such as DB files or backups 
-synchronized with rsync may lead to tens of thousands of fragments.
+	From time to time, I release new versions of e2fsprogs, to fix
+bugs and to make the utilities more robust.  You can always find
+information about the latest version at the the e2fsprogs web page,
+which is:
 
-	Original code defragments files along the extents of the 
-initial file, one at a time. While this tends to make them contiguous,
-it doesn't reduce the size of the extent tree. Now running defragment 
-along the continuous physical segments of the defragmented file. I'm 
-not sure why this wasn't done originally, so testing before use is 
-warranted. It's working on my tests.
+	http://e2fsprogs.sourceforge.net
 
-	Extent allocation now also incorporated small holes in sparse 
-files into the extents, because various levels of read-ahead will read 
-over them in any event. Admittedly this partially co-opts kernel 
-extent allocation logic, but helps with backups and range-scans of db 
-files. Kernel defrag IOCTL still preserves holes in sparse files; 
-they're just more likely to be allocated contiguous.
+	The INSTALL file has instructions on building and installing
+e2fsprogs.  Provisions for building Red Hat RPMs and Debian dpkg files
+are supplied as well.
 
+	In case of bugs in these programs, please contact Ted Ts'o at
+tytso@mit.edu or tytso@alum.mit.edu.  See the e2fsck man page for
+suggestions of what sort of information to include when submitting bug
+reports for these programs.
 
-	Bugs in e4defrag are responsibility of this author, and not 
-Ted Ts'o, but in any case use at your own risk and make sure your 
-backups have backups.
