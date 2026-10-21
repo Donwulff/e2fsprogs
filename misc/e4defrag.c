@@ -1222,7 +1222,7 @@ out:
 static void print_progress(const char *file, ext2_loff_t start,
 			   ext2_loff_t file_size)
 {
-	int percent = (start * 100) / file_size;
+	int percent = file_size > 0 ? (int)(100.0 * start / file_size) : 100;
 	printf("\033[79;0H\033[K[%u/%u]%s:\t%3d%%",
 		defraged_file_count, total_count, file, min(percent, 100));
 	fflush(stdout);
@@ -1254,7 +1254,7 @@ static int call_defrag(int fd, int donor_fd, const char *file,
 	move_data.donor_fd = donor_fd;
 
 	/* Print defrag progress */
-	print_progress(file, start, buf->st_blocks);
+	print_progress(file, start, buf->st_size);
 
 	ext_list_tmp = ext_list_head;
 	do {
@@ -1264,7 +1264,7 @@ static int call_defrag(int fd, int donor_fd, const char *file,
 		move_data.len = ext_list_tmp->len;
 #ifdef DEBUG
 		/* Make sure we don't exceed the donor file length */
-		ext2_loff_t file_blocks = (buf->st_blocks * 512 - 1) / buf->st_blksize + 1;
+		ext2_loff_t file_blocks = (buf->st_size - 1) / block_size + 1;
 		ext2_loff_t max_blocks = file_blocks - move_data.orig_start;
 		if (move_data.len > max_blocks) {
 			fprintf(stderr, "\nmove_data.len: %llu, size: %lu, blocks: %lu, start: %llu, max_blocks: %lli\n",
@@ -1331,25 +1331,26 @@ static int call_defrag(int fd, int donor_fd, const char *file,
 			}
 			return -1;
 		}
-		/* Adjust logical offset for next ioctl
-		 * syscall returns the number of blocks actually moved,
-		 * which excludes holes in sparse files.
+		/* A successful ioctl processed the requested logical range.
+		 * moved_len counts allocated blocks only, excluding holes.
 		 */
-		move_data.orig_start += move_data.moved_len;
+		move_data.orig_start += move_data.len;
 		move_data.donor_start = move_data.orig_start;
 
-		start = move_data.orig_start * buf->st_blksize;
+		start = move_data.orig_start * block_size;
 
 		/* Print defrag progress */
-		print_progress(file, start, buf->st_blocks);
+		print_progress(file, start, buf->st_size);
 
 		/* End of file */
-		if (start >= buf->st_blocks)
+		if (start >= buf->st_size)
 			break;
 
 		ext_list_tmp = ext_list_tmp->next;
 	} while (ext_list_tmp != ext_list_head);
 
+	/* Any trailing hole requires no extent moves. */
+	print_progress(file, buf->st_size, buf->st_size);
 	return 0;
 }
 
