@@ -9,11 +9,14 @@ The fork replaces e4defrag's insertion sort with mergesort adapted from the
 Linux kernel. Large, sparse database files and backups synchronized with
 rsync can have tens of thousands of extents, making extent sorting costly.
 
-It also defragments along contiguous physical segments of the donor file,
-rather than moving each original extent separately, to help reduce the
-extent tree. Allocation groups incorporate small holes of fewer than eight
-blocks to improve contiguity for read-ahead, backup scans, and database range
-scans. The kernel defragmentation ioctl still preserves sparse-file holes.
+It allocates donor space for groups of logically adjacent extents, including
+holes smaller than eight filesystem blocks. This gives the allocator an
+opportunity to place the group together for read-ahead, backup scans, and
+database range scans; physical contiguity is not guaranteed. Cache inspection
+and extent moves use bounded ranges within those allocations, shrinking the
+range on memory pressure. The kernel defragmentation ioctl preserves holes
+in the original file, so allocating donor space across a hole does not reserve
+that space in the original file for future writes.
 
 These e4defrag changes are experimental and should be tested before use.
 Fork-specific e4defrag bugs are the fork author's responsibility, not

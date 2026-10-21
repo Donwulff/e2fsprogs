@@ -77,6 +77,22 @@ upstream file and should remain unchanged by fork-only documentation edits.
 This avoids the repeated conflict when upstream updates its release number.
 GitHub displays the README from `.github` ahead of the root README.
 
+## Review the intended changes
+
+To review an upstream merge, compare its result with its **first parent**,
+which is the fork immediately before that merge. For the October 2026 sync:
+
+```sh
+git diff --stat c78515c2^1 c78515c2
+git diff c78515c2^1 c78515c2
+```
+
+Using `git diff upstream/master...HEAD` answers a different question: it
+shows everything the fork adds to upstream, including old features and
+workflows. That is useful for a whole-fork review, but does not isolate a
+new upstream merge. Use explicit commit IDs when later fixes have already
+been added on top of the merge.
+
 ## Build, test, and publish
 
 An out-of-tree build keeps generated files separate from the checkout:
@@ -86,7 +102,7 @@ sync_source=$PWD
 sync_build=$(mktemp -d /tmp/e2fsprogs-build.XXXXXX)
 cd "$sync_build"
 "$sync_source/configure" CFLAGS='-O2 -g -Wall'
-make -j8 check
+make -j8 check CFLAGS_WARN=-Werror
 cd "$sync_source"
 ```
 
