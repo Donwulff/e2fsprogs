@@ -200,7 +200,9 @@ jobs:
         export RANLIB=$TOOLCHAIN/bin/llvm-ranlib
         export STRIP=$TOOLCHAIN/bin/llvm-strip
         ./configure --host=${{matrix.target}} CFLAGS="$DEF_CFLAGS"
-    - run: make -j8 V=1 CFLAGS_WARN="-Werror"
+    # Newer NDKs deprecate legacy libc calls such as strtok(). Keep those
+    # warnings visible while upstream callers are updated, as on macOS.
+    - run: make -j8 V=1 CFLAGS_WARN="-Werror -Wno-error=deprecated-declarations"
     - uses: actions/upload-artifact@v4
       with:
         name: android-${{matrix.arch}}-config.h
