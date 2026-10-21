@@ -1,9 +1,31 @@
 name: CI
-on: [push]
+on: [push, pull_request, workflow_dispatch]
 env:
   DEF_CFLAGS: -O2 -g -Wall
 
 jobs:
+  e4defrag-debug-build:
+    name: Check e4defrag debug and alignment builds (${{ matrix.cc }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        cc: [gcc, clang]
+    steps:
+    - uses: actions/checkout@v4
+    - name: Configure and build e4defrag
+      run: |
+        ./configure --enable-defrag CC="${{ matrix.cc }}" CFLAGS="$DEF_CFLAGS"
+        make -j8 CFLAGS_WARN="-Werror"
+    - name: Compile optional diagnostic configurations
+      env:
+        CC: ${{ matrix.cc }}
+      run: |
+        for flags in '-DDEBUG' '-DALIGN' '-DDEBUG -DALIGN' '-DDEBUG2'; do
+          # Each flags value deliberately expands into compiler arguments.
+          # shellcheck disable=SC2086
+          "$CC" $DEF_CFLAGS -Werror $flags -Ilib -fsyntax-only misc/e4defrag.c
+        done
+
   gcc-build-and-test:
     name: Build and test with gcc
     runs-on: ubuntu-latest
