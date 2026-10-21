@@ -16,7 +16,7 @@ struct fiemap_extent_list {
         struct fiemap_extent_list *next;
         struct fiemap_extent_list *prev;
         struct fiemap_extent_data data; /* extent belong to file */
-} __attribute__((__packed__));
+};
 
 /* I wanted to use list_head to keep code identical to kernel,
  * and allow using same function for different types of lists.
@@ -33,8 +33,9 @@ struct list_head {
 
 #define list_head	fiemap_extent_list
 
+typedef int (*list_cmp_func_t)(void *priv, const struct list_head *a,
+			     const struct list_head *b);
+
 __attribute__((nonnull(2,3)))
-void list_sort(void *priv, struct list_head *head,
-	       int (*cmp)(void *priv, struct list_head *a,
-			  struct list_head *b));
+void list_sort(void *priv, struct list_head *head, list_cmp_func_t cmp);
 #endif

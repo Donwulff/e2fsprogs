@@ -789,16 +789,18 @@ static int join_extents(struct fiemap_extent_list *ext_list_head,
 	return 0;
 }
 
-static int cmp_physical(void *priv, struct list_head *a, struct list_head *b)
+static int cmp_physical(void *priv EXT2FS_ATTR((unused)),
+		const struct list_head *a, const struct list_head *b)
 {
-	return ((struct fiemap_extent_list*)a)->data.physical >
-		((struct fiemap_extent_list*)b)->data.physical;
+	return a->data.physical >
+		b->data.physical;
 }
 
-static int cmp_logical(void *priv, struct list_head *a, struct list_head *b)
+static int cmp_logical(void *priv EXT2FS_ATTR((unused)),
+		const struct list_head *a, const struct list_head *b)
 {
-	return ((struct fiemap_extent_list*)a)->data.logical >
-		((struct fiemap_extent_list*)b)->data.logical;
+	return a->data.logical >
+		b->data.logical;
 }
 
 static int sort_list_physical(struct fiemap_extent_list **physical_list_head)

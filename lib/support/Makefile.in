@@ -92,10 +92,18 @@ test_thread: $(srcdir)/thread.c
 	$(Q) $(CC) -o test_thread -DDEBUG_PROGRAM $(srcdir)/thread.c \
 		$(ALL_CFLAGS)
 
+test_list_sort: $(srcdir)/test_list_sort.c $(srcdir)/list_sort.c $(srcdir)/list_sort.h
+	$(E) " CC $@"
+	$(Q) $(CC) $(ALL_CFLAGS) $(ALL_LDFLAGS) -o $@ \
+		$(srcdir)/test_list_sort.c $(srcdir)/list_sort.c $(SYSLIBS)
+
+fullcheck check:: test_list_sort
+	./test_list_sort
+
 clean::
 	$(RM) -f \#* *.s *.o *.a *~ *.bak core profiled/* \
 		../libsupport.a ../libsupport_p.a $(SMANPAGES) \
-		prof_err.c prof_err.h test_profile test_cstring test_thread
+		prof_err.c prof_err.h test_profile test_cstring test_thread test_list_sort
 
 #fullcheck check:: tst_uuid
 #	LD_LIBRARY_PATH=$(LIB) DYLD_LIBRARY_PATH=$(LIB) ./tst_uuid
@@ -202,3 +210,6 @@ devname.o: $(srcdir)/devname.c $(top_builddir)/lib/config.h \
  $(top_builddir)/lib/dirpaths.h $(srcdir)/devname.h $(srcdir)/nls-enable.h
 cache.o: $(srcdir)/cache.c $(top_builddir)/lib/config.h \
  $(top_builddir)/lib/dirpaths.h $(srcdir)/list.h $(srcdir)/cache.h
+
+list_sort.o: $(srcdir)/list_sort.c $(srcdir)/list_sort.h \
+ $(top_builddir)/lib/ext2fs/ext2_types.h $(top_srcdir)/lib/ext2fs/crc32c_defs.h
