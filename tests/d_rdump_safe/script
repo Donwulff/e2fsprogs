@@ -1,0 +1,24 @@
+if ! test -x $DEBUGFS_EXE; then
+	echo "$test_name: $test_description: skipped (no debugfs)"
+	return 0
+fi
+OUT=$test_name.log
+EXP=$test_dir/expect
+echo "debugfs rdump path-traversal guard" > $OUT.new
+gunzip < $test_dir/image.gz > $TMPFILE
+DEST=$test_name.d
+rm -rf $DEST; mkdir -p $DEST/out
+echo "debugfs -R ''rdump / DEST/out'' image" >> $OUT.new
+$DEBUGFS -R "rdump / `pwd`/$DEST/out" $TMPFILE >> $OUT.new 2>&1
+echo "Exit status is $?" >> $OUT.new
+if test -e $DEST/escaped ; then echo "escaped outside destination: yes (VULNERABLE)" >> $OUT.new ; else echo "escaped outside destination: no" >> $OUT.new ; fi
+if test -e $DEST/out/loot ; then echo "legitimate file dumped: yes" >> $OUT.new ; else echo "legitimate file dumped: no" >> $OUT.new ; fi
+sed -f $cmd_dir/filter.sed $OUT.new | \
+	sed -e "s;`pwd`/;;g" -e "s/inode [0-9]*/inode NN/" | \
+	grep -v "Operation not permitted" > $OUT
+rm -rf $DEST $TMPFILE $OUT.new
+cmp -s $OUT $EXP
+status=$?
+if [ "$status" = 0 ] ; then echo "$test_name: $test_description: ok"; touch $test_name.ok
+else echo "$test_name: $test_description: failed"; diff $DIFF_OPTS $EXP $OUT > $test_name.failed; fi
+unset OUT EXP DEST

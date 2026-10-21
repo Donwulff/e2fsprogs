@@ -107,7 +107,8 @@
 #define THREAD_LOCAL static
 #endif
 
-#if defined(__linux__) && defined(__NR_gettid) && defined(HAVE_JRAND48)
+#if defined(__linux__) && defined(__NR_gettid) && \
+	defined(HAVE_JRAND48) && defined(HAVE_SYSCALL)
 #define DO_JRAND_MIX
 THREAD_LOCAL unsigned short jrand_seed[3];
 #endif

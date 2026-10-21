@@ -751,6 +751,9 @@ static void update_ea_inode_hash(struct rewrite_context *ctx, ext2_ino_t ino,
 	ext2_file_t file;
 	__u32 hash;
 
+	if (EXT2_I_SIZE(inode) > EXT2_XATTR_SIZE_MAX)
+		fatal_err(0, "ea_inode %u has an invalid size %llu", ino,
+			  EXT2_I_SIZE(inode));
 	retval = ext2fs_file_open(ctx->fs, ino, 0, &file);
 	if (retval)
 		fatal_err(retval, "open ea_inode");
@@ -775,6 +778,9 @@ static int update_xattr_entry_hashes(ext2_filsys fs,
 	errcode_t retval;
 
 	while (entry < end && !EXT2_EXT_IS_LAST_ENTRY(entry)) {
+		if ((char *) entry + sizeof(struct ext2_ext_attr_entry) >=
+		    (char *) end)
+			fatal_err(0, "corrupted extended attribute field");
 		if (entry->e_value_inum) {
 			retval = ext2fs_ext_attr_hash_entry2(fs, entry, NULL,
 							     &entry->e_hash);
@@ -943,7 +949,7 @@ static void rewrite_inodes(ext2_filsys fs, unsigned int flags)
 	if (retval)
 		fatal_err(retval, "while allocating memory");
 
-	retval = ext2fs_get_mem(64 * 1024, &ctx.ea_buf);
+	retval = ext2fs_get_mem(EXT2_XATTR_SIZE_MAX, &ctx.ea_buf);
 	if (retval)
 		fatal_err(retval, "while allocating memory");
 
@@ -2856,10 +2862,6 @@ err_out:
 	return retval;
 }
 
-
-#define list_for_each_safe(pos, pnext, head) \
-	for (pos = (head)->next, pnext = pos->next; pos != (head); \
-	     pos = pnext, pnext = pos->next)
 
 static void free_blk_move_list(void)
 {

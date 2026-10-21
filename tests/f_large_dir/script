@@ -7,19 +7,19 @@ DIRENT_SZ=8
 BLOCKSZ=1024
 INODESZ=128
 DIRENT_PER_LEAF=$((BLOCKSZ / (NAMELEN + DIRENT_SZ)))
-HEADER=32
 INDEX_SZ=8
-INDEX_L1=$(((BLOCKSZ - HEADER) / INDEX_SZ))
 INDEX_L2=$(((BLOCKSZ - DIRENT_SZ) / INDEX_SZ))
-DIRBLK=$((2 + INDEX_L1 * INDEX_L2))
+# more than two internal blocks at the top level
+DIRBLK=$((2 + 2 * INDEX_L2 * INDEX_L2))
 ENTRIES=$((DIRBLK * DIRENT_PER_LEAF))
-EXT4_LINK_MAX=65000
+EXT4_LINK_MAX=64900
 if [ $ENTRIES -lt $((EXT4_LINK_MAX + 10)) ]; then
 	ENTRIES=$((EXT4_LINK_MAX + 10))
 	DIRBLK=$((ENTRIES / DIRENT_PER_LEAF + 3))
 fi
-# directory leaf blocks plus inode count and 25% for the rest of the fs
-FSIZE=$(((DIRBLK + EXT4_LINK_MAX * ((BLOCKSZ + INODESZ) / BLOCKSZ)) * 5 / 4))
+# directory leaf blocks plus half for the internal nodes plus inode count
+# and 25% for the rest of the fs
+FSIZE=$(((DIRBLK + DIRBLK / 2 + EXT4_LINK_MAX * ((BLOCKSZ + INODESZ) / BLOCKSZ)) * 5 / 4))
 
 $MKE2FS -b 1024 -O large_dir,uninit_bg -N $((ENTRIES + 50)) \
 	-I $INODESZ -F $TMPFILE $FSIZE > $OUT.new 2>&1
@@ -50,6 +50,7 @@ if [ $RC -eq 0 ]; then
 {
 	START=$SECONDS
 	i=$(($DIRENT_PER_LEAF+1))
+	links=1
 	last=$i
 	echo "cd /foo"
 	while test $i -lt $ENTRIES ; do
@@ -64,9 +65,12 @@ if [ $RC -eq 0 ]; then
 		printf "mkdir d%0254u\n" $i
 	    else
 		printf "ln foofile f%0254u\n" $i
+		links=$((links+1))
 	    fi
 	    i=$((i + 1))
 	done
+	# adjust nlink count because ln didn't
+	echo "sif foofile links_count $links"
 } | $DEBUGFS -w $TMPFILE > /dev/null 2>> $OUT.new
 	RC=$?
 fi
@@ -74,7 +78,12 @@ fi
 if [ $RC -eq 0 ]; then
 	$E2FSCK -yfD $TMPFILE >> $OUT.new 2>&1
 	status=$?
-	echo Exit status is $status >> $OUT.new
+	echo E2FSCK -D exit status is $status >> $OUT.new
+
+	$E2FSCK -fn $TMPFILE >> $OUT.new 2>&1
+	status=$?
+	echo E2FSCK r/o exit status is $status >> $OUT.new
+
 	sed -f $cmd_dir/filter.sed -e "s;$TMPFILE;test.img;" $OUT.new > $OUT
 	rm -f $OUT.new
 

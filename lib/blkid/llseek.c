@@ -35,62 +35,29 @@
 
 #ifdef __linux__
 
-#if defined(HAVE_LSEEK64) && defined(HAVE_LSEEK64_PROTOTYPE)
-
-#define my_llseek lseek64
-
-#elif defined(HAVE_LLSEEK)
 #include <sys/syscall.h>
-
-#ifndef HAVE_LLSEEK_PROTOTYPE
-extern long long llseek(int fd, long long offset, int origin);
-#endif
-
-#define my_llseek llseek
-
-#else	/* ! HAVE_LLSEEK */
-
-#if SIZEOF_LONG == SIZEOF_LONG_LONG
-
-#define my_llseek lseek
-
-#else /* SIZEOF_LONG != SIZEOF_LONG_LONG */
-
-#include <linux/unistd.h>
-
-#ifndef __NR__llseek
-#define __NR__llseek            140
-#endif
-
-#ifndef __i386__
-static int _llseek(unsigned int, unsigned long, unsigned long,
-		   blkid_loff_t *, unsigned int);
-
-static _syscall5(int, _llseek, unsigned int, fd, unsigned long, offset_high,
-		 unsigned long, offset_low, blkid_loff_t *, result,
-		 unsigned int, origin)
-#endif
 
 static blkid_loff_t my_llseek(int fd, blkid_loff_t offset, int origin)
 {
+#if SIZEOF_OFF_T >= 8
+	return lseek(fd, offset, origin);
+#elif HAVE_LSEEK64_PROTOTYPE
+	return lseek64(fd, offset, origin);
+#elif HAVE_LLSEEK_PROTOTYPE
+	return llseek(fd, offset, origin);
+#elif defined(__NR__llseek)
 	blkid_loff_t result;
 	int retval;
 
-#ifndef __i386__
-	retval = _llseek(fd, ((unsigned long long) offset) >> 32,
-			 ((unsigned long long)offset) & 0xffffffff,
-			 &result, origin);
-#else
 	retval = syscall(__NR__llseek, fd, ((unsigned long long) offset) >> 32,
 			 ((unsigned long long)offset) & 0xffffffff,
 			 &result, origin);
-#endif
 	return (retval == -1 ? (blkid_loff_t) retval : result);
+#else
+	errno = ENOSYS;
+	return -1;
+#endif
 }
-
-#endif	/* __alpha__ || __ia64__ */
-
-#endif /* HAVE_LLSEEK */
 
 blkid_loff_t blkid_llseek(int fd, blkid_loff_t offset, int whence)
 {

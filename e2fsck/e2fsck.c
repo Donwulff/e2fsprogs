@@ -36,6 +36,10 @@ errcode_t e2fsck_allocate_context(e2fsck_t *ret)
 	context->htree_slack_percentage = 255;
 
 	time_env = getenv("E2FSCK_TIME");
+	if (!time_env)
+		time_env = getenv("SOURCE_DATE_EPOCH");
+	if (!time_env)
+		time_env = getenv("E2FSPROGS_FAKE_TIME");
 	if (time_env)
 		context->now = (time_t) strtoull(time_env, NULL, 0);
 	else {

@@ -1,0 +1,184 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Copyright (c) 2006 Silicon Graphics, Inc.
+ * All Rights Reserved.
+ */
+#ifndef __CACHE_H__
+#define __CACHE_H__
+
+/*  2^63 + 2^61 - 2^57 + 2^54 - 2^51 - 2^18 + 1 */
+#define GOLDEN_RATIO_PRIME	0x9e37fffffffc0001UL
+#ifndef CACHE_LINE_SIZE
+/* if the system didn't tell us, guess something reasonable */
+#define CACHE_LINE_SIZE		64
+#endif
+
+/*
+ * initialisation flags
+ */
+/*
+ * xfs_db always writes changes immediately, and so we need to purge buffers
+ * when we get a buffer lookup mismatch due to reading the same block with a
+ * different buffer configuration.
+ */
+#define CACHE_MISCOMPARE_PURGE	(1 << 0)
+
+/* Automatically shrink the cache's max_count when possible. */
+#define CACHE_AUTO_SHRINK	(1 << 1)
+
+#define CACHE_FLAGS_ALL		(CACHE_MISCOMPARE_PURGE | \
+				 CACHE_AUTO_SHRINK)
+
+/*
+ * cache object campare return values
+ */
+enum {
+	CACHE_HIT,
+	CACHE_MISS,
+	CACHE_PURGE,
+};
+
+#define	HASH_CACHE_RATIO	8
+
+/*
+ * Cache priorities range from BASE to MAX.
+ *
+ * For prefetch support, the top half of the range starts at
+ * CACHE_PREFETCH_PRIORITY and everytime the buffer is fetched and is at or
+ * above this priority level, it is reduced to below this level (refer to
+ * libxfs_buf_get).
+ *
+ * If we have dirty nodes, we can't recycle them until they've been cleaned. To
+ * keep these out of the reclaimable lists (as there can be lots of them) give
+ * them their own priority that the shaker doesn't attempt to walk.
+ */
+
+#define CACHE_BASE_PRIORITY	0
+#define CACHE_PREFETCH_PRIORITY	8
+#define CACHE_MAX_PRIORITY	15
+#define CACHE_DIRTY_PRIORITY	(CACHE_MAX_PRIORITY + 1)
+#define CACHE_NR_PRIORITIES	CACHE_DIRTY_PRIORITY
+
+/*
+ * Simple, generic implementation of a cache (arbitrary data).
+ * Provides a hash table with a capped number of cache entries.
+ */
+
+struct cache;
+struct cache_node;
+
+typedef void *cache_key_t;
+
+typedef void (*cache_walk_t)(struct cache *c, struct cache_node *cn, void *d);
+typedef struct cache_node * (*cache_node_alloc_t)(struct cache *c, cache_key_t k);
+typedef bool (*cache_node_flush_t)(struct cache *c, struct cache_node *cn);
+typedef void (*cache_node_relse_t)(struct cache *c, struct cache_node *cn);
+typedef unsigned int (*cache_node_hash_t)(cache_key_t, unsigned int,
+					  unsigned int);
+typedef int (*cache_node_compare_t)(struct cache_node *, cache_key_t);
+typedef unsigned int (*cache_bulk_relse_t)(struct cache *, struct list_head *);
+typedef int (*cache_node_get_t)(struct cache *c, struct cache_node *cn);
+typedef void (*cache_node_put_t)(struct cache *c, struct cache_node *cn);
+typedef unsigned int (*cache_node_resize_t)(const struct cache *c,
+					    unsigned int curr_size,
+					    int dir);
+
+static inline unsigned int cache_gradual_resize(const struct cache *cache EXT2FS_ATTR((unused)),
+						unsigned int curr_size,
+						int dir)
+{
+	if (dir < 0)
+		return curr_size * 9 / 10;
+	else if (dir > 0)
+		return curr_size * 5 / 4;
+	return curr_size;
+}
+
+struct cache_operations {
+	cache_node_hash_t	hash;
+	cache_node_alloc_t	alloc;
+	cache_node_flush_t	flush;
+	cache_node_relse_t	relse;
+	cache_node_compare_t	compare;
+	cache_bulk_relse_t	bulkrelse;	/* optional */
+	cache_node_get_t	get;		/* optional */
+	cache_node_put_t	put;		/* optional */
+	cache_node_resize_t	resize;		/* optional */
+};
+
+struct cache_hash {
+	struct list_head	ch_list;	/* hash chain head */
+	unsigned int		ch_count;	/* hash chain length */
+	pthread_mutex_t		ch_mutex;	/* hash chain mutex */
+};
+
+struct cache_mru {
+	struct list_head	cm_list;	/* MRU head */
+	unsigned int		cm_count;	/* MRU length */
+	pthread_mutex_t		cm_mutex;	/* MRU lock */
+};
+
+struct cache_node {
+	struct list_head	cn_hash;	/* hash chain */
+	struct list_head	cn_mru;		/* MRU chain */
+	unsigned int		cn_count;	/* reference count */
+	unsigned int		cn_hashidx;	/* hash chain index */
+	int			cn_priority;	/* priority, -1 = free list */
+	int			cn_old_priority;/* saved pre-dirty prio */
+	pthread_mutex_t		cn_mutex;	/* node mutex */
+};
+
+struct cache {
+	int			c_flags;	/* behavioural flags */
+	unsigned int		c_orig_max;	/* original max cache nodes */
+	unsigned int		c_maxcount;	/* max cache nodes */
+	unsigned int		c_count;	/* count of nodes */
+	pthread_mutex_t		c_mutex;	/* node count mutex */
+	cache_node_hash_t	hash;		/* node hash function */
+	cache_node_alloc_t	alloc;		/* allocation function */
+	cache_node_flush_t	flush;		/* flush dirty data function */
+	cache_node_relse_t	relse;		/* memory free function */
+	cache_node_compare_t	compare;	/* comparison routine */
+	cache_bulk_relse_t	bulkrelse;	/* bulk release routine */
+	cache_node_get_t	get;		/* prepare cache node after get */
+	cache_node_put_t	put;		/* prepare to put cache node */
+	cache_node_resize_t	resize;		/* compute new maxcount */
+	unsigned int		c_hashsize;	/* hash bucket count */
+	unsigned int		c_hashshift;	/* hash key shift */
+	struct cache_hash	*c_hash;	/* hash table buckets */
+	struct cache_mru	c_mrus[CACHE_DIRTY_PRIORITY + 1];
+	unsigned long long	c_misses;	/* cache misses */
+	unsigned long long	c_hits;		/* cache hits */
+	unsigned int 		c_max;		/* max nodes ever used */
+};
+
+static inline bool cache_initialized(const struct cache *cache)
+{
+	return cache->hash != NULL;
+}
+
+int cache_init(int flags, unsigned int size,
+	       const struct cache_operations *ops, struct cache *cache);
+void cache_destroy(struct cache *cache);
+void cache_walk(struct cache *cache, cache_walk_t fn, void *data);
+void cache_purge(struct cache *);
+bool cache_flush(struct cache *cache);
+void cache_shrink(struct cache *cache);
+
+void cache_set_maxcount(struct cache *cache, unsigned int maxcount);
+int cache_set_flag(struct cache *cache, int flags);
+int cache_clear_flag(struct cache *cache, int flags);
+
+/* don't allocate a new node */
+#define CACHE_GET_INCORE	(1U << 0)
+int cache_node_get(struct cache *c, cache_key_t key, unsigned int cgflags,
+		   struct cache_node **nodep);
+void cache_node_put(struct cache *, struct cache_node *);
+void cache_node_set_priority(struct cache *, struct cache_node *, int);
+int cache_node_get_priority(struct cache_node *);
+int cache_node_purge(struct cache *, cache_key_t, struct cache_node *);
+void cache_report(FILE *fp, const char *, struct cache *);
+int cache_overflowed(struct cache *);
+struct cache_node *cache_node_grab(struct cache *cache, struct cache_node *node);
+
+#endif	/* __CACHE_H__ */

@@ -116,13 +116,11 @@ static void check_ea_inode(e2fsck_t ctx, ext2_ino_t i, ext2_ino_t *last_ino,
 	/* No references to the inode from xattrs? */
 	if (actual_refs == EA_INODE_NO_REFS) {
 		/*
-		 * No references from directory hierarchy either? Inode will
-		 * will get attached to lost+found so clear EA_INODE_FL.
-		 * Otherwise this is likely a spuriously set flag so clear it.
+		 * Whether the inode gets attached to lost+found or it
+		 * is attached to the directory hierarchy, we need to
+		 * clear a spuriously set EA_INODE_FL flag.
 		 */
-		if (*link_counted == 0 &&
-		    fix_problem(ctx, PR_4_EA_INODE_SPURIOUS_FLAG, &pctx)) {
-			/* Clear EA_INODE_FL (likely a normal file) */
+		if (fix_problem(ctx, PR_4_EA_INODE_SPURIOUS_FLAG, &pctx)) {
 			inode->i_flags &= ~EXT4_EA_INODE_FL;
 			e2fsck_write_inode(ctx, i, EXT2_INODE(inode), "pass4");
 		}

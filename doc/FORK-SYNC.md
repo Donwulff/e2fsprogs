@@ -88,6 +88,11 @@ cd "$sync_build"
 "$sync_source/configure" CFLAGS='-O2 -g -Wall'
 make -j8 check
 cd "$sync_source"
+```
+
+After the build and tests pass, review the branch and publish it:
+
+```sh
 git diff --check
 git status --short
 git push origin defrag-mergesort

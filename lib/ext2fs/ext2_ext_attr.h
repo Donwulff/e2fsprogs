@@ -58,15 +58,9 @@ struct ext2_ext_attr_entry {
 	(((size) + EXT2_EXT_ATTR_ROUND) & ~EXT2_EXT_ATTR_ROUND)
 
 /*
- * XATTR_SIZE_MAX is currently 64k, but for the purposes of checking
- * for file system consistency errors, we use a somewhat bigger value.
- * This allows XATTR_SIZE_MAX to grow in the future, but by using this
- * instead of INT_MAX for certain consistency checks, we don't need to
- * worry about arithmetic overflows.  (Actually XATTR_SIZE_MAX is
- * defined in include/uapi/linux/limits.h, so changing it is going
- * not going to be trivial....)
+ * XATTR_SIZE_MAX as defined in include/uapi/linux/limits.h is 64k
  */
-#define EXT2_XATTR_SIZE_MAX (1 << 24)
+#define EXT2_XATTR_SIZE_MAX (64 * 1024)
 
 #ifdef __KERNEL__
 # ifdef CONFIG_EXT2_FS_EXT_ATTR

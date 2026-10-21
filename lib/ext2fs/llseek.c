@@ -35,7 +35,7 @@
 
 #ifdef __linux__
 
-#include <linux/unistd.h>
+#include <sys/syscall.h>
 
 static ext2_loff_t my_llseek (int fd, ext2_loff_t offset, int origin)
 {

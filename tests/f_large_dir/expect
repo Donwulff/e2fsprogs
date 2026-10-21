@@ -1,5 +1,5 @@
 128-byte inodes cannot handle dates beyond 2038 and are deprecated
-Creating filesystem with 108341 1k blocks and 65072 inodes
+Creating filesystem with 141612 1k blocks and 96912 inodes
 Superblock backups stored on blocks: 
 	8193, 24577, 40961, 57345, 73729
 
@@ -15,20 +15,22 @@ Pass 4: Checking reference counts
 Pass 5: Checking group summary information
 
 test.img: ***** FILE SYSTEM WAS MODIFIED *****
-test.img: 17/65072 files (5.9% non-contiguous), 9732/108341 blocks
+test.img: 17/96912 files (5.9% non-contiguous), 13720/141612 blocks
 Exit status is 0
 Pass 1: Checking inodes, blocks, and sizes
 Pass 2: Checking directory structure
 Pass 3: Checking directory connectivity
 Pass 3A: Optimizing directories
 Pass 4: Checking reference counts
-Directory exceeds max links, but no DIR_NLINK feature in superblock.
-Fix? yes
-
-Inode 12 ref count is 65012, should be 1.  Fix? yes
-
 Pass 5: Checking group summary information
 
 test.img: ***** FILE SYSTEM WAS MODIFIED *****
-test.img: 65023/65072 files (0.0% non-contiguous), 96666/108341 blocks
-Exit status is 1
+test.img: 64923/96912 files (0.0% non-contiguous), 111270/141612 blocks
+E2FSCK -D exit status is 0
+Pass 1: Checking inodes, blocks, and sizes
+Pass 2: Checking directory structure
+Pass 3: Checking directory connectivity
+Pass 4: Checking reference counts
+Pass 5: Checking group summary information
+test.img: 64923/96912 files (0.0% non-contiguous), 111270/141612 blocks
+E2FSCK r/o exit status is 0

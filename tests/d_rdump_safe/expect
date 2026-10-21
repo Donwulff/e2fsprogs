@@ -1,0 +1,6 @@
+debugfs rdump path-traversal guard
+debugfs -R ''rdump / DEST/out'' image
+rdump: skipping entry with unsafe name (inode NN)
+Exit status is 0
+escaped outside destination: no
+legitimate file dumped: yes

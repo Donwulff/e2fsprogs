@@ -317,6 +317,16 @@ static int rdump_dirent(struct ext2_dir_entry *dirent,
 	strncpy(name, dirent->name, thislen);
 	name[thislen] = 0;
 
+	/* Path-traversal guard: reject entry names that would escape the
+	 * destination directory. A valid ext2/3/4 filesystem never contains
+	 * a name with '/' or an empty name; e2fsck treats such names as
+	 * corruption (PR_2_BAD_NAME). */
+	if (name[0] == 0 || strchr(name, '/')) {
+		com_err("rdump", 0, "skipping entry with unsafe name (inode %u)",
+			dirent->inode);
+		return 0;
+	}
+
 	if (debugfs_read_inode(dirent->inode, &inode, name))
 		return 0;
 
@@ -330,7 +340,7 @@ void do_rdump(int argc, ss_argv_t argv, int sci_idx EXT2FS_ATTR((unused)),
 {
 	struct stat st;
 	char *dest_dir;
-	int i;
+	int i, err;
 
 	if (common_args_process(argc, argv, 3, INT_MAX, "rdump",
 				"<directory>... <native directory>", 0))
@@ -340,14 +350,25 @@ void do_rdump(int argc, ss_argv_t argv, int sci_idx EXT2FS_ATTR((unused)),
 	dest_dir = argv[argc - 1];
 	argc--;
 
-	/* Ensure last arg is a directory. */
-	if (stat(dest_dir, &st) == -1) {
-		com_err("rdump", errno, "while statting %s", dest_dir);
-		return;
-	}
-	if (!S_ISDIR(st.st_mode)) {
-		com_err("rdump", 0, "%s is not a directory", dest_dir);
-		return;
+	err = lstat(dest_dir, &st);
+	if (err < 0) {
+		if (errno == ENOENT) {
+			if (mkdir(dest_dir, 0755) == -1) {
+				com_err("rdump", errno, "while creating %s",
+					dest_dir);
+				return;
+			}
+		} else {
+			com_err("rdump", errno, "while statting %s",
+				dest_dir);
+			return;
+		}
+	} else {
+		if (!S_ISDIR(st.st_mode)) {
+			com_err("rdump", 0, "%s is not a directory",
+				dest_dir);
+			return;
+		}
 	}
 
 	for (i = 1; i < argc; i++) {

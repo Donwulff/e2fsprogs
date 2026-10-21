@@ -11,6 +11,12 @@
 
 #include "config.h"
 #include "e2p.h"
+#ifdef HAVE_STRINGS_H
+#include <strings.h>	/* for strcasecmp() */
+#else
+#define _BSD_SOURCE	/* for inclusion of strcasecmp() via <string.h> */
+#define _DEFAULT_SOURCE	  /* since glibc 2.20 _BSD_SOURCE is deprecated */
+#endif
 #include <string.h>
 #include <stdlib.h>
 

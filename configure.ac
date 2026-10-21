@@ -1,6 +1,6 @@
 AC_INIT
 AC_CONFIG_SRCDIR([version.h])
-AC_PREREQ([2.71])
+AC_PREREQ([2.72])
 AC_CONFIG_AUX_DIR(config)
 AC_CONFIG_HEADERS([lib/config.h])
 AH_BOTTOM([#include <dirpaths.h>])
@@ -943,7 +943,7 @@ dnl End of configuration options
 dnl
 AC_SUBST(BINARY_TYPE)
 AC_PROG_MAKE_SET
-CHECK_GNU_MAKE
+AX_CHECK_GNU_MAKE
 AC_PATH_PROG(LN, ln, ln)
 AC_PROG_MKDIR_P
 dnl
@@ -1226,6 +1226,7 @@ AC_CHECK_FUNCS(m4_flatten([
 	add_key
 	backtrace
 	chflags
+	daemon
 	dlopen
 	fadvise64
 	fallocate
@@ -1233,6 +1234,7 @@ AC_CHECK_FUNCS(m4_flatten([
 	fchown
 	fcntl
 	fdatasync
+	fls
 	fstat64
 	fsync
 	ftruncate64
@@ -1246,6 +1248,7 @@ AC_CHECK_FUNCS(m4_flatten([
 	getrandom
 	getrlimit
 	getrusage
+	gettid
 	jrand48
 	keyctl
 	llistxattr
@@ -1269,6 +1272,8 @@ AC_CHECK_FUNCS(m4_flatten([
 	pwrite
 	pread64
 	pwrite64
+	pthread_setname_np
+	pthread_threadid_np
 	qsort_r
 	secure_getenv
 	setmntent
@@ -1283,6 +1288,7 @@ AC_CHECK_FUNCS(m4_flatten([
 	strptime
 	strtoull
 	sync_file_range
+	syscall
 	sysconf
 	usleep
 	utime
@@ -1366,92 +1372,205 @@ dnl Check to see if librt is required for clock_gettime() (glibc < 2.17)
 dnl
 AC_CHECK_LIB(rt, clock_gettime, [CLOCK_GETTIME_LIB=-lrt])
 AC_SUBST(CLOCK_GETTIME_LIB)
+
 dnl
-dnl Check to see if the FUSE library is -lfuse3, -losxfuse, or -lfuse
+dnl Check to see if the FUSE library is -lfuse3 or -losxfuse
 dnl
-FUSE_CMT=
 FUSE_LIB=
 dnl osxfuse.dylib supersedes fuselib.dylib
-AC_ARG_ENABLE([fuse2fs],
-AS_HELP_STRING([--disable-fuse2fs],[do not build fuse2fs]),
-if test "$enableval" = "no"
-then
-	FUSE_CMT="#"
-	AC_MSG_RESULT([Disabling fuse2fs])
-else
-	AC_PREPROC_IFELSE(
-[AC_LANG_PROGRAM([[#ifdef __linux__
-#include <linux/fs.h>
-#include <linux/falloc.h>
-#include <linux/xattr.h>
-#endif
-]], [])], [], [AC_MSG_FAILURE([Cannot find fuse2fs Linux headers.])])
-
-	PKG_CHECK_MODULES([fuse3], [fuse3],
-	  [
-		FUSE_LIB=-lfuse3
-	  ], [
-		AC_CHECK_HEADERS([pthread.h fuse.h], [],
-			[AC_MSG_FAILURE([Cannot find fuse2fs headers.])],
-[#define _FILE_OFFSET_BITS	64
-#define FUSE_USE_VERSION 29])
-
-		AC_CHECK_LIB(osxfuse, fuse_main, [FUSE_LIB=-losxfuse],
-			[AC_CHECK_LIB(fuse, fuse_main, [FUSE_LIB=-lfuse],
-				[AC_MSG_FAILURE([Cannot find fuse library.])])])
-	  ])
-	AC_MSG_RESULT([Enabling fuse2fs])
-fi
-,
-PKG_CHECK_MODULES([fuse3], [fuse3],
-  [
-	FUSE_LIB=-lfuse3
-  ], [
-	AC_CHECK_HEADERS([pthread.h fuse.h], [], [FUSE_CMT="#"], 
-[#define _FILE_OFFSET_BITS	64
-#define FUSE_USE_VERSION 29
-#ifdef __linux__
-# include <linux/fs.h>
-# include <linux/falloc.h>
-# include <linux/xattr.h>
-#endif])
-	if test -z "$FUSE_CMT"
-	then
-		AC_CHECK_LIB(osxfuse, fuse_main, [FUSE_LIB=-losxfuse],
-			[AC_CHECK_LIB(fuse, fuse_main, [FUSE_LIB=-lfuse],
-				[FUSE_CMT="#"])])
-	fi
-  ])
-if test -z "$FUSE_CMT"
-then
-	AC_MSG_RESULT([Enabling fuse2fs by default.])
-fi
-)
+PKG_CHECK_MODULES([fuse3], [fuse3], [FUSE_LIB=-lfuse3],
+[
+	AC_CHECK_LIB(osxfuse, fuse_main, [FUSE_LIB=-losxfuse])
+])
 AC_SUBST(FUSE_LIB)
-AC_SUBST(FUSE_CMT)
-if test "$FUSE_LIB" = "-lfuse3"
+
+dnl
+dnl Set FUSE_USE_VERSION, which is how fuse servers build against a particular
+dnl libfuse ABI.  Currently we link against the libfuse 3.14 ABI (hence 314)
+dnl
+if test -n "$FUSE_LIB"
 then
-	FUSE_USE_VERSION=35
+	FUSE_USE_VERSION=314
 	CFLAGS="$fuse3_CFLAGS $CFLAGS"
 	FUSE_LIB="$fuse3_LIBS"
 	AC_CHECK_HEADERS([pthread.h fuse.h], [],
-		[AC_MSG_FAILURE([Cannot find fuse3 fuse2fs headers.])],
+		[AC_MSG_FAILURE([Cannot build against fuse3 headers])],
 [#define _FILE_OFFSET_BITS	64
-#define FUSE_USE_VERSION 35
-#ifdef __linux__
-#include <linux/fs.h>
-#include <linux/falloc.h>
-#include <linux/xattr.h>
-#endif])
-elif test -n "$FUSE_LIB"
-then
-	FUSE_USE_VERSION=29
+#define FUSE_USE_VERSION	314])
 fi
 if test -n "$FUSE_USE_VERSION"
 then
 	AC_DEFINE_UNQUOTED(FUSE_USE_VERSION, $FUSE_USE_VERSION,
 		[Define to the version of FUSE to use])
 fi
+
+dnl
+dnl Check if the FUSE lowlevel library is supported
+dnl
+have_fuse_lowlevel=
+if test -n "$FUSE_USE_VERSION"
+then
+	AC_MSG_CHECKING(for lowlevel interface in libfuse)
+	AC_LINK_IFELSE(
+	[	AC_LANG_PROGRAM([[
+	#define _GNU_SOURCE
+	#define _FILE_OFFSET_BITS	64
+	#define FUSE_USE_VERSION	314
+	#include <fuse_lowlevel.h>
+		]], [[
+	struct fuse_lowlevel_ops fs_ops = { };
+		]])
+	], have_fuse_lowlevel=yes
+	   AC_MSG_RESULT(yes),
+	   AC_MSG_RESULT(no))
+fi
+if test -n "$have_fuse_lowlevel"
+then
+	AC_DEFINE(HAVE_FUSE_LOWLEVEL, 1,
+		  [Define to 1 if fuse supports lowlevel API])
+fi
+
+dnl
+dnl Check if fuse2fs is actually built.
+dnl
+FUSE2FS_CMT=
+AC_ARG_ENABLE([fuse2fs],
+AS_HELP_STRING([--disable-fuse2fs],[do not build fuse2fs]),
+[
+	if test "$enableval" = "no"
+	then
+		FUSE2FS_CMT="#"
+		AC_MSG_RESULT([Disabling fuse2fs])
+	else
+		AC_PREPROC_IFELSE(
+	[AC_LANG_PROGRAM([[#ifdef __linux__
+	#include <linux/fs.h>
+	#include <linux/falloc.h>
+	#include <linux/xattr.h>
+	#endif
+	]], [])], [], [AC_MSG_FAILURE([Cannot find fuse2fs Linux headers])])
+
+		if test -z "$FUSE_USE_VERSION"
+		then
+			AC_MSG_FAILURE([Cannot find fuse library.])
+		fi
+		AC_MSG_RESULT([Enabling fuse2fs])
+	fi
+], [
+	if test -n "$FUSE_USE_VERSION"
+	then
+		AC_MSG_RESULT([Enabling fuse2fs by default])
+	else
+		FUSE2FS_CMT="#"
+		AC_MSG_RESULT([Disabling fuse2fs by default])
+	fi
+]
+)
+AC_SUBST(FUSE2FS_CMT)
+
+dnl
+dnl Check if fuse4fs is actually built.
+dnl
+FUSE4FS_CMT=
+AC_ARG_ENABLE([fuse4fs],
+AS_HELP_STRING([--disable-fuse4fs],[do not build fuse4fs]),
+[
+	if test "$enableval" = "no"
+	then
+		FUSE4FS_CMT="#"
+		AC_MSG_RESULT([Disabling fuse4fs])
+	else
+		AC_PREPROC_IFELSE(
+	[AC_LANG_PROGRAM([[#ifdef __linux__
+	#include <linux/fs.h>
+	#include <linux/falloc.h>
+	#include <linux/xattr.h>
+	#endif
+	]], [])], [], [AC_MSG_FAILURE([Cannot find fuse4fs Linux headers])])
+
+		if test -z "$have_fuse_lowlevel"
+		then
+			AC_MSG_FAILURE([Cannot find fuse lowlevel library.])
+		fi
+		AC_MSG_RESULT([Enabling fuse4fs])
+	fi
+], [
+	if test -n "$have_fuse_lowlevel"
+	then
+		AC_MSG_RESULT([Enabling fuse4fs by default])
+	else
+		FUSE4FS_CMT="#"
+		AC_MSG_RESULT([Disabling fuse4fs by default])
+	fi
+]
+)
+AC_SUBST(FUSE4FS_CMT)
+
+dnl
+dnl Check if the FUSE cache_readdir flag is supported
+dnl
+have_fuse_cache_readdir=
+if test -n "$FUSE_USE_VERSION"
+then
+	AC_MSG_CHECKING(for cache_readdir support in libfuse)
+	AC_LINK_IFELSE(
+	[	AC_LANG_PROGRAM([[
+	#define _GNU_SOURCE
+	#define _FILE_OFFSET_BITS	64
+	#define FUSE_USE_VERSION	314
+	#include <fuse.h>
+		]], [[
+	struct fuse_file_info fs_ops = {
+		.cache_readdir = 1,
+	};
+		]])
+	], have_fuse_cache_readdir=yes
+	   AC_MSG_RESULT(yes),
+	   AC_MSG_RESULT(no))
+fi
+if test -n "$have_fuse_cache_readdir"
+then
+	AC_DEFINE(HAVE_FUSE_CACHE_READDIR, 1,
+		  [Define to 1 if fuse supports cache_readdir])
+fi
+
+dnl
+dnl see if PR_SET_IO_FLUSHER exists
+dnl
+AC_MSG_CHECKING(for PR_SET_IO_FLUSHER)
+AC_LINK_IFELSE(
+[	AC_LANG_PROGRAM([[
+#define _GNU_SOURCE
+#include <sys/prctl.h>
+	]], [[
+prctl(PR_SET_IO_FLUSHER, 0, 0, 0, 0);
+	]])
+], have_pr_set_io_flusher=yes
+   AC_MSG_RESULT(yes),
+   AC_MSG_RESULT(no))
+if test "$have_pr_set_io_flusher" = yes; then
+  AC_DEFINE(HAVE_PR_SET_IO_FLUSHER, 1, [Define to 1 if PR_SET_IO_FLUSHER is present])
+fi
+
+dnl
+dnl see if CLOCK_MONOTONIC exists
+dnl
+AC_MSG_CHECKING(for CLOCK_MONOTONIC)
+AC_LINK_IFELSE(
+[	AC_LANG_PROGRAM([[
+#define _GNU_SOURCE
+#include <time.h>
+	]], [[
+struct timespec nuts;
+clock_gettime(CLOCK_MONOTONIC, &nuts);
+	]])
+], have_clock_monotonic=yes
+   AC_MSG_RESULT(yes),
+   AC_MSG_RESULT(no))
+if test "$have_clock_monotonic" = yes; then
+  AC_DEFINE(HAVE_CLOCK_MONOTONIC, 1, [Define to 1 if CLOCK_MONOTONIC is present])
+fi
+
 dnl
 dnl See if optreset exists
 dnl
@@ -1997,6 +2116,24 @@ OS_IO_FILE=""
 esac]
 AC_SUBST(OS_IO_FILE)
 
+dnl Check for fsverity ioctl
+if test "${ac_cv_header_linux_fsverity_h}" = "yes"; then
+   AC_MSG_CHECKING([for FS_IOC_READ_VERITY_METADATA ioctl])
+   AC_PREPROC_IFELSE(
+   [AC_LANG_PROGRAM([[
+#include <linux/fsverity.h>
+#ifndef FS_IOC_READ_VERITY_METADATA
+# error "FS_IOC_READ_VERITY_METADATA not available"
+#endif
+]], [])], [
+   AC_DEFINE([HAVE_FS_IOC_READ_VERITY_METADATA], [1], [Define to 1 if FS_IOC_READ_VERITY_METADATA ioctl is available])
+   AC_MSG_RESULT([yes])
+   ],
+   [
+   AC_MSG_RESULT([no])
+   ])
+fi
+
 dnl
 dnl Make our output files, being sure that we create the some miscellaneous 
 dnl directories
@@ -2022,7 +2159,7 @@ for i in MCONFIG Makefile \
 	misc/Makefile ext2ed/Makefile e2fsck/Makefile \
 	debugfs/Makefile tests/Makefile tests/progs/Makefile \
 	tests/fuzz/Makefile resize/Makefile doc/Makefile \
-	po/Makefile.in scrub/Makefile; do
+	po/Makefile.in scrub/Makefile fuse4fs/Makefile; do
 	if test -d `dirname ${srcdir}/$i` ; then
 		outlist="$outlist $i"
 	fi

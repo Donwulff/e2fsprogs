@@ -1211,6 +1211,7 @@ static errcode_t try_open_fs(e2fsck_t ctx, int flags, io_manager io_ptr,
 
 	if (retval == 0) {
 		(*ret_fs)->priv_data = ctx;
+		(*ret_fs)->now = ctx->now;
 		e2fsck_set_bitmap_type(*ret_fs, EXT2FS_BMAP64_RBTREE,
 				       "default", NULL);
 	}
@@ -1230,7 +1231,7 @@ static errcode_t e2fsck_check_mmp(ext2_filsys fs, e2fsck_t ctx)
 
 	clear_problem_context(&pctx);
 	if (fs->mmp_buf == NULL) {
-		retval = ext2fs_get_mem(fs->blocksize, &fs->mmp_buf);
+		retval = ext2fs_mmp_get_mem(fs, &fs->mmp_buf);
 		if (retval)
 			goto check_error;
 	}
