@@ -18,6 +18,10 @@ range on memory pressure. The kernel defragmentation ioctl preserves holes
 in the original file, so allocating donor space across a hole does not reserve
 that space in the original file for future writes.
 
+See [Donor grouping, holes, and alignment](../doc/E4DEFRAG-DONOR-ALLOCATION.md)
+for the current algorithm, the changes made during the bug fixes, the original
+alignment experiment, and proposed runtime controls.
+
 These e4defrag changes are experimental and should be tested before use.
 Fork-specific e4defrag bugs are the fork author's responsibility, not
 Ted Ts'o's. Use at your own risk and keep backups of your data.
