@@ -124,6 +124,9 @@
  */
 #define EXTENT_MAX_COUNT	512
 
+/* Limit cache mappings and moves, independently of donor allocation size. */
+#define DEFRAG_MAX_BYTES	(64 * 1024 * 1024)
+
 /* The following macros are error message */
 #define MSG_USAGE		\
 "Usage	: e4defrag [-v] file...| directory...| device...\n\
@@ -364,7 +367,7 @@ static int page_in_core(int fd, struct move_extent defrag_data,
 	offset = (offset / pagesize) * pagesize;
 	length = end_offset - offset;
 
-	page = mmap(NULL, length, PROT_READ, MAP_SHARED, fd, offset);
+	page = mmap64(NULL, length, PROT_READ, MAP_SHARED, fd, offset);
 	if (page == MAP_FAILED)
 		return -1;
 
@@ -372,14 +375,26 @@ static int page_in_core(int fd, struct move_extent defrag_data,
 	*page_num = (length + pagesize - 1) / pagesize;
 	*vec = (unsigned char *)calloc(*page_num, 1);
 	if (*vec == NULL) {
+		int saved_errno = errno;
+
 		munmap(page, length);
+		errno = saved_errno;
 		return -1;
 	}
 
-	/* Get information on whether pages are in core */
-	if (mincore(page, (size_t)length, *vec) == -1 ||
-		munmap(page, length) == -1) {
+	/* Always release the mapping, including when mincore fails. */
+	if (mincore(page, (size_t)length, *vec) == -1) {
+		int saved_errno = errno;
+
+		munmap(page, length);
 		FREE(*vec);
+		*vec = NULL;
+		errno = saved_errno;
+		return -1;
+	}
+	if (munmap(page, length) == -1) {
+		FREE(*vec);
+		*vec = NULL;
 		return -1;
 	}
 
@@ -1246,6 +1261,11 @@ static int call_defrag(int fd, int donor_fd, const char *file,
 	unsigned int	page_num;
 	unsigned char	*vec = NULL;
 	int	defraged_ret = 0;
+	int	move_errno;
+	__u64	group_end;
+	__u64	file_blocks = buf->st_size / block_size +
+			      (buf->st_size % block_size != 0);
+	__u64	max_blocks = DEFRAG_MAX_BYTES / block_size;
 	int	ret;
 	struct move_extent	move_data;
 	struct fiemap_extent_group	*ext_list_tmp = NULL;
@@ -1259,92 +1279,92 @@ static int call_defrag(int fd, int donor_fd, const char *file,
 	ext_list_tmp = ext_list_head;
 	do {
 		move_data.orig_start = ext_list_tmp->start->data.logical;
-		/* Logical offset of orig and donor should be same */
-		move_data.donor_start = move_data.orig_start;
-		move_data.len = ext_list_tmp->len;
+		group_end = min(move_data.orig_start + ext_list_tmp->len,
+				file_blocks);
+		while (move_data.orig_start < group_end) {
+			/* Logical offsets of orig and donor must be the same. */
+			move_data.donor_start = move_data.orig_start;
+			move_data.len = min(group_end - move_data.orig_start,
+					    max_blocks);
+			move_data.moved_len = 0;
+
+			/* Retry cache inspection with less address space.
+			 * The donor is already allocated; its layout is unchanged.
+			 */
+			for (;;) {
+				ret = page_in_core(fd, move_data, &vec, &page_num);
+				if (ret == 0 || errno != ENOMEM ||
+				    move_data.len == 1)
+					break;
+				move_data.len /= 2;
+				max_blocks = move_data.len;
+			}
+			if (ret < 0) {
+				if (mode_flag & DETAIL) {
+					printf("\n");
+					PRINT_ERR_MSG_WITH_ERRNO(
+							"Failed to get file map");
+				} else {
+					printf("\t[ NG ]\n");
+				}
+				return -1;
+			}
+
+			/* EXT4_IOC_MOVE_EXT */
+			defraged_ret =
+				ioctl(fd, EXT4_IOC_MOVE_EXT, &move_data);
+			move_errno = errno;
 #ifdef DEBUG
-		/* Make sure we don't exceed the donor file length */
-		ext2_loff_t file_blocks = (buf->st_size - 1) / block_size + 1;
-		ext2_loff_t max_blocks = file_blocks - move_data.orig_start;
-		if (move_data.len > max_blocks) {
-			fprintf(stderr, "\nmove_data.len: %llu, size: %lu, blocks: %lu, start: %llu, max_blocks: %lli\n",
+			fprintf(stderr, "EXT4_IOC_MOVE_EXT: move_data.len: %llu, orig: %llu, donor: %llu, moved: %llu\n",
 				move_data.len,
-				buf->st_size,
-				buf->st_blocks,
 				move_data.orig_start,
-				max_blocks);
-		}
-#endif
-		move_data.moved_len = 0;
-
-		ret = page_in_core(fd, move_data, &vec, &page_num);
-		if (ret < 0) {
-			if (mode_flag & DETAIL) {
-				printf("\n");
-				PRINT_ERR_MSG_WITH_ERRNO(
-						"Failed to get file map");
-			} else {
-				printf("\t[ NG ]\n");
-			}
-			return -1;
-		}
-
-		/* EXT4_IOC_MOVE_EXT */
-		defraged_ret =
-			ioctl(fd, EXT4_IOC_MOVE_EXT, &move_data);
-#ifdef DEBUG
-		fprintf(stderr, "EXT4_IOC_MOVE_EXT: move_data.len: %llu, orig: %llu, donor: %llu, moved: %llu\n",
-			move_data.len,
-			move_data.orig_start,
-			move_data.donor_start,
-			move_data.moved_len);
+				move_data.donor_start,
+				move_data.moved_len);
 #endif
 
-		/* Free pages */
-		ret = defrag_fadvise(fd, move_data, vec, page_num);
-		if (vec) {
-			free(vec);
-			vec = NULL;
-		}
-		if (ret < 0) {
-			if (mode_flag & DETAIL) {
-				printf("\n");
-				PRINT_ERR_MSG_WITH_ERRNO(
-					"Failed to free page");
-			} else {
-				printf("\t[ NG ]\n");
+			/* Free pages */
+			ret = defrag_fadvise(fd, move_data, vec, page_num);
+			if (vec) {
+				free(vec);
+				vec = NULL;
 			}
-			return -1;
-		}
-
-		if (defraged_ret < 0) {
-			if (mode_flag & DETAIL) {
-				printf("\n");
-				PRINT_ERR_MSG_WITH_ERRNO(
-					"Failed to defrag with "
-					"EXT4_IOC_MOVE_EXT ioctl");
-				if (errno == ENOTTY)
-					printf("\tAt least 2.6.31-rc1 of "
-						"vanilla kernel is required\n");
-			} else {
-				printf("\t[ NG ]\n");
+			if (ret < 0) {
+				if (mode_flag & DETAIL) {
+					printf("\n");
+					PRINT_ERR_MSG_WITH_ERRNO(
+						"Failed to free page");
+				} else {
+					printf("\t[ NG ]\n");
+				}
+				return -1;
 			}
-			return -1;
+
+			if (defraged_ret < 0) {
+				errno = move_errno;
+				if (mode_flag & DETAIL) {
+					printf("\n");
+					PRINT_ERR_MSG_WITH_ERRNO(
+						"Failed to defrag with "
+						"EXT4_IOC_MOVE_EXT ioctl");
+					if (errno == ENOTTY)
+						printf("\tAt least 2.6.31-rc1 of "
+							"vanilla kernel is required\n");
+				} else {
+					printf("\t[ NG ]\n");
+				}
+				return -1;
+			}
+			/* A successful ioctl processed the requested logical range.
+			 * moved_len counts allocated blocks only, excluding holes.
+			 */
+			move_data.orig_start += move_data.len;
+			move_data.donor_start = move_data.orig_start;
+
+			start = move_data.orig_start * block_size;
+
+			/* Print defrag progress */
+			print_progress(file, start, buf->st_size);
 		}
-		/* A successful ioctl processed the requested logical range.
-		 * moved_len counts allocated blocks only, excluding holes.
-		 */
-		move_data.orig_start += move_data.len;
-		move_data.donor_start = move_data.orig_start;
-
-		start = move_data.orig_start * block_size;
-
-		/* Print defrag progress */
-		print_progress(file, start, buf->st_size);
-
-		/* End of file */
-		if (start >= buf->st_size)
-			break;
 
 		ext_list_tmp = ext_list_tmp->next;
 	} while (ext_list_tmp != ext_list_head);
