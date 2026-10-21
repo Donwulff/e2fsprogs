@@ -884,7 +884,9 @@ static ext4_fsblk_t get_file_blocks(struct fiemap_extent_list *ext_list_head)
 static void free_ext(struct fiemap_extent_list *ext_list_head)
 {
 	struct fiemap_extent_list	*ext_list_tmp = NULL;
-	int count=0;
+#ifdef DEBUG2
+	int count = 0;
+#endif
 
 	if (ext_list_head == NULL) {
 #ifdef DEBUG2
@@ -899,7 +901,9 @@ static void free_ext(struct fiemap_extent_list *ext_list_head)
 		ext_list_head->next->prev = ext_list_head->prev;
 		ext_list_head = ext_list_head->next;
 		free(ext_list_tmp);
+#ifdef DEBUG2
 		count++;
+#endif
 	}
 	free(ext_list_head);
 #ifdef DEBUG2
@@ -1527,25 +1531,21 @@ static int file_defrag(const char *file, const struct stat64 *buf,
 	/* Allocate space for donor inode */
 	orig_group_tmp = orig_group_head;
 	do {
+		ext2_loff_t alloc_len = (ext2_loff_t)orig_group_tmp->len * block_size;
 #ifdef ALIGN
-		ext2_loff_t padded_len = (ext2_loff_t)orig_group_tmp->len * block_size;
 		/* Round up if we have more than one unit; kernel should align and trim us
 		 * Don't pad last group for now, because we'll run out of source file data
 		 */
 		if(buf->st_blocks > 16 && orig_group_tmp->next != orig_group_head) {
-			padded_len = ((padded_len - 1) / 65536 + 1) * 65536;
+			alloc_len = ((alloc_len - 1) / 65536 + 1) * 65536;
 		}
 #endif
 #ifdef DEBUG
-		fprintf(stderr, "Allocate: %llu\n", padded_len);
+		fprintf(stderr, "Allocate: %llu\n", (unsigned long long)alloc_len);
 #endif
 		ret = fallocate(donor_fd, 0,
 		  (ext2_loff_t)orig_group_tmp->start->data.logical * block_size,
-#ifdef ALIGN
-		  padded_len);
-#else
-		  (ext2_loff_t)orig_group_tmp->len * block_size);
-#endif
+		  alloc_len);
 		if (ret < 0) {
 			if (mode_flag & DETAIL) {
 				PRINT_FILE_NAME(file);
