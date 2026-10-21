@@ -14,6 +14,7 @@ MKDIR_P = @MKDIR_P@
 
 @DEFRAG_CMT@@LINUX_CMT@E4DEFRAG_PROG= e4defrag
 @DEFRAG_CMT@@LINUX_CMT@E4DEFRAG_MAN= e4defrag.8
+@DEFRAG_CMT@@LINUX_CMT@E4DEFRAG_TEST= test_e4defrag
 
 @LINUX_CMT@E4CRYPT_PROG = e4crypt
 @LINUX_CMT@E4CRYPT_MAN= e4crypt.8
@@ -272,6 +273,15 @@ base_device: base_device.c
 fullcheck check:: base_device
 	./base_device < $(srcdir)/base_device.tst > base_device.out
 	cmp $(srcdir)/base_device.tst base_device.out
+
+test_e4defrag: $(srcdir)/test_e4defrag.c $(srcdir)/e4defrag.c \
+		$(top_srcdir)/lib/support/list_sort.h $(DEPLIBS)
+	$(E) "\tLD $@"
+	$(Q) $(CC) $(ALL_CFLAGS) $(ALL_LDFLAGS) -o $@ \
+		$(srcdir)/test_e4defrag.c $(LIBS) $(SYSLIBS)
+
+fullcheck check:: $(E4DEFRAG_TEST)
+	$(Q) if test -n "$(E4DEFRAG_TEST)"; then ./$(E4DEFRAG_TEST); fi
 
 mklost+found: $(MKLPF_OBJS)
 	$(E) "	LD $@"
@@ -710,7 +720,7 @@ uninstall:
 clean::
 	$(RM) -f $(SPROGS) $(USPROGS) $(UPROGS) $(UMANPAGES) $(SMANPAGES) \
 		$(FMANPAGES) profile.h \
-		base_device base_device.out mke2fs.static filefrag e2freefrag \
+		base_device base_device.out test_e4defrag mke2fs.static filefrag e2freefrag \
 		e2initrd_helper partinfo prof_err.[ch] default_profile.c \
 		uuidd e2image tune2fs.static tst_ismounted fsck.profiled \
 		blkid.profiled tune2fs.profiled e2image.profiled \

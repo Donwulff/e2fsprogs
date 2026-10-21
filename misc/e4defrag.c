@@ -776,9 +776,7 @@ static int get_file_extents(int fd, struct fiemap_extent_list **ext_list_head)
 
 	FREE(fiemap_buf);
 
-	sort_list_physical(ext_list_head);
-
-	return 0;
+	return sort_list_physical(ext_list_head);
 out:
 	FREE(fiemap_buf);
 	return -1;
