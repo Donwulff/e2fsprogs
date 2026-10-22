@@ -22,6 +22,10 @@ See [Donor grouping, holes, and alignment](../doc/E4DEFRAG-DONOR-ALLOCATION.md)
 for the current algorithm, the changes made during the bug fixes, the original
 alignment experiment, and proposed runtime controls.
 
+See [Status and verbosity assessment](../doc/E4DEFRAG-STATUS-OUTPUT.md)
+for current output limitations and proposed status labels, diagnostic levels,
+and reporting of sparse-file placement. These output changes are proposals.
+
 These e4defrag changes are experimental and should be tested before use.
 Fork-specific e4defrag bugs are the fork author's responsibility, not
 Ted Ts'o's. Use at your own risk and keep backups of your data.
