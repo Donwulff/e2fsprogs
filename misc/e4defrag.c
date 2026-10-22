@@ -61,6 +61,8 @@
 #endif
 
 /* Macro functions */
+/* Redraw the current line without assuming a terminal height. */
+#define RESET_PROGRESS_LINE "\r\033[K"
 #define PRINT_ERR_MSG(msg)	fprintf(stderr, "%s\n", (msg))
 #define IN_FTW_PRINT_ERR_MSG(msg)	\
 	fprintf(stderr, "\t%s\t\t[ NG ]\n", (msg))
@@ -538,7 +540,7 @@ static int file_check(int fd, const struct stat64 *buf, const char *file,
 	ret = check_free_size(fd, file, blk_count);
 	if (ret < 0) {
 		if ((mode_flag & DETAIL) && ret == -ENOSPC) {
-			printf("\033[79;0H\033[K[%u/%u] \"%s\"\t\t"
+			printf(RESET_PROGRESS_LINE "[%u/%u] \"%s\"\t\t"
 				"  extents: %d -> %d\n", defraged_file_count,
 				total_count, file, extents, extents);
 			IN_FTW_PRINT_ERR_MSG(
@@ -551,7 +553,7 @@ static int file_check(int fd, const struct stat64 *buf, const char *file,
 	if (current_uid != ROOT_UID &&
 		buf->st_uid != current_uid) {
 		if (mode_flag & DETAIL) {
-			printf("\033[79;0H\033[K[%u/%u] \"%s\"\t\t"
+			printf(RESET_PROGRESS_LINE "[%u/%u] \"%s\"\t\t"
 				"  extents: %d -> %d\n", defraged_file_count,
 				total_count, file, extents, extents);
 			IN_FTW_PRINT_ERR_MSG(
@@ -1165,24 +1167,24 @@ static int file_statistic(const char *file, const struct stat64 *buf,
 			 defraged_file_count, total_count, PATH_MAX, file);
 		if (current_uid == ROOT_UID) {
 			if (strlen(msg_buffer) > 40)
-				printf("\033[79;0H\033[K%s\n"
+				printf(RESET_PROGRESS_LINE "%s\n"
 				       "%50d/%-10d%6llu KB\n",
 				       msg_buffer, now_ext_count,
 				       best_ext_count,
 				       (unsigned long long) size_per_ext);
 			else
-				printf("\033[79;0H\033[K%-40s"
+				printf(RESET_PROGRESS_LINE "%-40s"
 				       "%10d/%-10d%6llu KB\n",
 				       msg_buffer, now_ext_count,
 				       best_ext_count,
 				       (unsigned long long) size_per_ext);
 		} else {
 			if (strlen(msg_buffer) > 40)
-				printf("\033[79;0H\033[K%s\n%50d/%-10s%7s\n",
+				printf(RESET_PROGRESS_LINE "%s\n%50d/%-10s%7s\n",
 						msg_buffer, now_ext_count,
 							"-", "-");
 			else
-				printf("\033[79;0H\033[K%-40s%10d/%-10s%7s\n",
+				printf(RESET_PROGRESS_LINE "%-40s%10d/%-10s%7s\n",
 						msg_buffer, now_ext_count,
 							"-", "-");
 		}
@@ -1238,7 +1240,7 @@ static void print_progress(const char *file, ext2_loff_t start,
 			   ext2_loff_t file_size)
 {
 	int percent = file_size > 0 ? (int)(100.0 * start / file_size) : 100;
-	printf("\033[79;0H\033[K[%u/%u]%s:\t%3d%%",
+	printf(RESET_PROGRESS_LINE "[%u/%u]%s:\t%3d%%",
 		defraged_file_count, total_count, file, min(percent, 100));
 	fflush(stdout);
 
@@ -1634,7 +1636,7 @@ check_improvement:
 	if (file_frags_start <= best ||
 			orig_physical_cnt <= donor_physical_cnt) {
 #endif
-		printf("\033[79;0H\033[K[%u/%u]%s:\t%3d%%",
+		printf(RESET_PROGRESS_LINE "[%u/%u]%s:\t%3d%%",
 			defraged_file_count, total_count, file, 100);
 		if (mode_flag & DETAIL)
 			printf("  extents: %d -> %d (%d)",
