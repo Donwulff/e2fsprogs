@@ -87,6 +87,12 @@ locations with a three-block gap between them. That is the intended placement
 opportunity. Their logical hole still prevents them from becoming a single
 logical extent.
 
+The intent is to **keep the source sparse while giving its allocated blocks
+the physical spacing they would have in a fully allocated file**. Filling the
+source hole or permanently reserving its backing blocks is not required for
+this policy to be useful: ext4 has allocation heuristics that can later reuse
+the matching physical gap, as described below.
+
 The kernel skips holes in the **source** when moving extents. The donor's
 allocation over `[10, 13)` therefore remains in the donor and is released on
 close. The source still has a hole; it does not own a reservation for future
@@ -94,16 +100,108 @@ writes there. Other files can subsequently use that freed space. This follows
 from the source-hole handling in
 [Linux v7.0 `ext4_move_extents()`](https://github.com/torvalds/linux/blob/v7.0/fs/ext4/move_extent.c).
 
-A true hole and allocated-but-unwritten space both read as zeros, but only the
-latter owns blocks. Reserving future database capacity requires a separate
-preallocation policy on the original file, with different space accounting
-and sparse-file behavior. If an application later punches a hole, it releases
-that allocation again. See the allocation and hole-punch semantics in
+Allocated-but-unwritten space would instead own blocks, with different space
+accounting and sparse-file behavior. That is a separate policy, outside the
+intent here. See the allocation and hole-punch semantics in
 [`fallocate(2)`](https://man7.org/linux/man-pages/man2/fallocate.2.html).
 
-Thus, “allocate the whole donor once” and “reserve the whole database for
-future writes” are separate features. The former cannot provide the latter
-through the existing hole-preserving move operation.
+## Does ext4 prefer the matching physical gap on a later write?
+
+**Yes, as an allocation preference, not a guarantee.** The Linux v7.0 extent
+allocator explicitly predicts placement as if a sparse file will eventually
+be filled in. Its comment names database table-space growth as an example,
+and also identifies the free-space fragmentation tradeoff for files that
+remain sparse.
+
+The relevant path is:
+
+1. [`ext4_ext_find_goal()`](https://github.com/torvalds/linux/blob/v7.0/fs/ext4/extents.c#L215-L249)
+   predicts a physical goal from a nearby extent, preserving the difference
+   in logical offsets. In block units, the relation is
+   `goal = extent_physical_start + (write_logical_offset - extent_logical_start)`.
+   `ext4_ext_map_blocks()` also supplies the logical and physical positions
+   of allocated neighbors on both sides to the multiblock allocator.
+2. [`ext4_mb_normalize_request()`](https://github.com/torvalds/linux/blob/v7.0/fs/ext4/mballoc.c#L4518-L4685)
+   can enlarge a request for preallocation, trims it against existing logical
+   neighbors, and sets a physical goal that would join the left or right
+   neighbor. In that path it sets `EXT4_MB_HINT_TRY_GOAL`.
+3. [`ext4_mb_regular_allocator()`](https://github.com/torvalds/linux/blob/v7.0/fs/ext4/mballoc.c#L3000-L3017)
+   tries that goal before its wider free-space searches. The goal check tests
+   whether sufficient space is available there and applies relevant stripe
+   alignment requirements.
+
+For the earlier example, suppose A occupies physical blocks `[1000, 1010)`
+and B occupies `[1013, 1023)`. A later write to logical blocks `[10, 13)` has
+the matching physical goal `[1010, 1013)`. Both neighboring extents agree on
+that placement. If the gap remains available and the allocation path accepts
+it, the new data can complete a physically continuous run. Adjacent extents
+can also merge when their lengths and extent states permit it.
+
+There are qualifications: ext4 tries usable existing preallocations before
+its regular allocator; small-file group allocation and requests that disable
+normalization take different paths; request size, stripe alignment, and
+competing allocations can prevent the exact goal from being used. Releasing
+the donor does not leave an exclusive claim on the gap. If another file
+acquires it, ext4 must find other space. Nor does the allocator remember the
+defragmenter's intention: it infers the opportunity from the current extent
+map. See [`ext4_mb_new_blocks()` and `ext4_mb_group_or_file()`](https://github.com/torvalds/linux/blob/v7.0/fs/ext4/mballoc.c).
+
+This source review supports the rationale for preserving physical spacing,
+especially for holes that are likely to be filled again. It does not establish
+how often the preferred placement succeeds on a particular filesystem or
+whether that policy outperforms packing for a particular workload. The
+upstream v7.0 source is the reference here; distribution patches can differ.
+
+## Preserving spacing versus packing existing data
+
+Both policies below keep the same logical offsets, contents, and source holes:
+
+```text
+Logical file:       [ A:10 ][ hole:3 ][ B:10 ]
+Physical spacing:   [ A:10 ][ free:3 ][ B:10 ]
+Physical packing:   [ A:10 ][ B:10 ]
+```
+
+The physical rows illustrate successful placement, not a promise about what
+`fallocate()` will return. With spacing, later writes have room to fill the
+logical hole without relocating A or B. With packing, existing data occupies
+a shorter physical span, but writing the logical hole requires space elsewhere
+or moving an existing extent. Packing still needs separate logical extents
+for A and B because the logical hole remains.
+
+For an HDD scan, packing may reduce the physical distance traversed between
+existing data ranges. Readahead works in logical file offsets, however; a
+hole yields zeros without reading a backing data block. Physical adjacency
+alone does not guarantee a merged I/O request or a particular prefetch
+behavior. The benefit, especially across small gaps, needs measurement.
+
+The current implementation offers the spacing policy within each group.
+Setting a future hole threshold to zero would only split donor allocation
+requests at logical holes; it would **not** implement guaranteed physical
+packing. A packing policy would need a donor plan that maps consecutive
+allocated donor ranges to the source's separated data ranges and verifies
+the resulting physical layout. `EXT4_IOC_MOVE_EXT` accepts separate source
+and donor logical offsets, subject to matching offsets within a page, so
+such a policy is possible in principle but is not implemented here.
+
+## Can defragmentation move only selected data into existing gaps?
+
+A logical hole has no data blocks to move into. Moving a different part of
+the file to that logical offset would change its contents. By contrast,
+relocating selected data into **free physical blocks between existing
+extents**, while keeping its logical offset, is a valid defragmentation
+strategy and need not relocate the whole file.
+
+The ext4 move ioctl operates on a selected range, but its destination is
+blocks already allocated to a separate donor inode. It does not accept a
+physical disk address or allocate the desired gap itself. Ordinary
+`fallocate()` likewise offers no exact physical-address selection. A
+targeted implementation would have to obtain suitable donor blocks, inspect
+their FIEMAP placement, and move only the ranges that improve the layout;
+reliable selection of a particular free physical gap would need additional
+allocator support. The current program allocates replacement donor groups
+and does not implement this selective gap-filling strategy. See the
+[range checks and move loop](https://github.com/torvalds/linux/blob/v7.0/fs/ext4/move_extent.c#L512-L648).
 
 ## What the October fixes changed
 
@@ -235,9 +333,11 @@ These are review findings and follow-up work, not changes made by this document:
   gap distances and the same logical data ranges. A donor-region count that
   includes filled holes is only a candidate-selection heuristic. Measure
   actual read performance and allocator cost before changing defaults.
-- **Database growth:** preserving holes and retaining capacity reservations
-  have different semantics. Decide that policy with the application's
-  allocation/punching behavior in view.
+- **Database growth:** measure whether writes refill the matching physical
+  gaps after donor release, including writes in different orders and after
+  competing allocations. Compare spacing against packing while preserving
+  the same logical holes; permanent capacity reservation is a different
+  policy.
 
 The [existing regressions](../misc/test_e4defrag.c) verify sparse ranges,
 bounded mappings and failure handling using mocked extent-moving ioctls.
@@ -245,8 +345,10 @@ They do not establish physical placement. The next architecture tests should
 use a disposable mounted ext4 volume: verify data hashes, source holes and
 FIEMAP maps before/after; exercise 7- versus 8-block gaps, constrained free
 space, padding boundaries, and different recorded stripe geometries. Compare
-cached and uncached workloads separately. A stripe-aware default needs those
-measurements in addition to parser and bookkeeping tests.
+FIEMAP again after filling holes, both immediately and after other files have
+consumed free space. Compare cached and uncached workloads separately. A
+stripe-aware default needs those measurements in addition to parser and
+bookkeeping tests.
 
 ## Clarification about the code-quality workflows
 
