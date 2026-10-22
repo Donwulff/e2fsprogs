@@ -10,6 +10,7 @@ struct fiemap_extent_data {
         __u64 len;                      /* blocks count */
         __u64 logical;          /* start logical block number */
         ext4_fsblk_t physical;          /* start physical block number */
+        __u32 flags;                   /* FIEMAP extent properties */
 };
 
 struct fiemap_extent_list {

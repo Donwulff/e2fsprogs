@@ -200,6 +200,10 @@ static int test_ioctl(int fd EXT2FS_ATTR((unused)), unsigned long request, ...)
 		return 0;
 	}
 	if (fixture) {
+		if (fixture_maps >= 2 && after_error) {
+			errno = after_error;
+			return -1;
+		}
 		unsigned int count = fixture_maps++ ? donor_runs : source_runs;
 
 		fm->fm_mapped_extents = count;
@@ -392,6 +396,8 @@ static void run_file_case(const char *path, const struct stat64 *st,
 	assert(saved_stdout >= 0);
 	assert(dup2(fileno(capture), STDOUT_FILENO) >= 0);
 	fixture_maps = move_count = 0;
+	defraged_file_count = 0;
+	total_count = 1;
 	had_error = 0;
 	memset(outcomes, 0, sizeof(outcomes));
 	assert(file_defrag(path, st, flag, NULL) == 0);
@@ -432,6 +438,53 @@ static void run_main_case(int argc, char **argv, int expected)
 	assert(WIFEXITED(status) && WEXITSTATUS(status) == expected);
 }
 
+static void link_nodes(struct fiemap_extent_list *nodes, unsigned int count)
+{
+	unsigned int i;
+
+	for (i = 0; i < count; i++) {
+		nodes[i].next = &nodes[(i + 1) % count];
+		nodes[i].prev = &nodes[(i + count - 1) % count];
+	}
+}
+
+static void check_layout_measurements(void)
+{
+	struct fiemap_extent_list before[3] = {0}, after[4] = {0};
+	struct layout_measurement m;
+
+	link_nodes(before, 3);
+	before[0].data = (struct fiemap_extent_data){ .logical = 0, .physical = 100, .len = 10 };
+	before[1].data = (struct fiemap_extent_data){ .logical = 13, .physical = 113, .len = 10 };
+	before[2].data = (struct fiemap_extent_data){ .logical = 100, .physical = 200, .len = 10 };
+	m = measure_layout(before);
+	assert(m.valid && m.extents == 3 && m.data_runs == 3);
+	assert(m.groups == 2 && m.spacing_runs == 2 && m.bridged_holes == 3);
+	assert(m.blocks == 30);
+	before[1].data.physical = 90; /* Backward jump must not underflow. */
+	m = measure_layout(before);
+	assert(m.valid && m.extents == 3 && m.spacing_runs == 3);
+	before[1].data.physical = 113;
+	link_nodes(after, 4);
+	after[0].data = before[0].data;
+	after[0].data.len = 5;
+	after[1].data = (struct fiemap_extent_data){ .logical = 5, .physical = 105, .len = 5 };
+	after[2].data = before[1].data;
+	after[3].data = before[2].data;
+	m = measure_layout(after);
+	assert(m.extents == 4 && m.data_runs == 3 && m.spacing_runs == 2);
+	assert(same_logical_coverage(before, after));
+	after[1].data.len--;
+	assert(!same_logical_coverage(before, after));
+	after[1].data.len++;
+	after[2].data.flags = FIEMAP_EXTENT_UNKNOWN;
+	assert(!measure_layout(after).valid);
+	after[2].data.flags = FIEMAP_EXTENT_DELALLOC;
+	assert(!measure_layout(after).valid);
+	after[2].data.flags = FIEMAP_EXTENT_UNWRITTEN;
+	assert(measure_layout(after).valid);
+}
+
 static void check_file_results(void)
 {
 	char path[] = "/tmp/e4defrag-status-XXXXXX";
@@ -446,13 +499,18 @@ static void check_file_results(void)
 	current_uid = getuid();
 	interactive_output = mode_flag = 0;
 	lost_found_dir[0] = 0;
-	run_file_case(path, &st, FTW_F, RESULT_MOVED, "MOVED; moved 122880 bytes");
+	run_file_case(path, &st, FTW_F, RESULT_MOVED, "\t100%\t[ OK ]\n");
 	mode_flag = DETAIL;
-	run_file_case(path, &st, FTW_F, RESULT_MOVED, "extents 3 -> 1");
+	run_file_case(path, &st, FTW_F, RESULT_MOVED, "\t100%  extents: 3 -> 1\t[ OK ]\n");
+	mode_flag = DETAIL | DIAGNOSTIC;
+	run_file_case(path, &st, FTW_F, RESULT_MOVED, "(estimated best: 1, fallback)\t[ MOVED ]\n");
+	mode_flag = DETAIL;
 	after_error = EIO;
-	run_file_case(path, &st, FTW_F, RESULT_MOVED, "after-map unavailable");
+	run_file_case(path, &st, FTW_F, RESULT_MOVED, "final extent count unavailable");
+	mode_flag = DETAIL | DIAGNOSTIC;
+	run_file_case(path, &st, FTW_F, RESULT_MOVED, "final extent count unavailable");
 	after_error = 0;
-	mode_flag = 0;
+	mode_flag = DETAIL | DIAGNOSTIC;
 	donor_runs = 3;
 	run_file_case(path, &st, FTW_F, RESULT_SKIPPED, "donor not better");
 	donor_runs = 1;
@@ -470,9 +528,9 @@ static void check_file_results(void)
 	lock_file = 0;
 	move_error = EIO;
 	partial_blocks = 7;
-	run_file_case(path, &st, FTW_F, RESULT_FAILED, "moved 28672 bytes");
+	run_file_case(path, &st, FTW_F, RESULT_FAILED, "28672 bytes already moved");
 	move_error = EFAULT;
-	run_file_case(path, &st, FTW_F, RESULT_FAILED, "total unknown");
+	run_file_case(path, &st, FTW_F, RESULT_FAILED, "Total movement is unknown");
 	move_error = 0;
 	partial_blocks = 0;
 	skipped_blocks = 30;
@@ -484,13 +542,17 @@ static void check_file_results(void)
 	other.st_mode = S_IFDIR | 0700;
 	run_file_case(path, &other, FTW_D, RESULT_EXCLUDED, NULL);
 	run_file_case("bad\n\033name", NULL, FTW_NS, RESULT_FAILED,
-		      "\"bad\\x0a\\x1bname\": FAILED");
+		      "[1/1]bad\\x0a\\x1bname:");
 	{
 		char *good[] = { "e4defrag", path, NULL };
+		char *verbose[] = { "e4defrag", "-vv", path, NULL };
+		char *check[] = { "e4defrag", "-cv", path, NULL };
 		char *mixed[] = { "e4defrag", path, "/no/such/e4defrag-target", NULL };
 		char *reverse[] = { "e4defrag", "/no/such/e4defrag-target", path, NULL };
 
 		run_main_case(2, good, 0);
+		run_main_case(3, verbose, 0);
+		run_main_case(3, check, 0);
 		run_main_case(3, mixed, 1);
 		run_main_case(3, reverse, 1);
 	}
@@ -516,6 +578,7 @@ int main(void)
 	check_large_group(1);
 	check_mapping_errors();
 	check_file_results();
+	check_layout_measurements();
 	fflush(stdout);
 	assert(dup2(saved_stdout, STDOUT_FILENO) >= 0);
 	close(saved_stdout);

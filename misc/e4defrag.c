@@ -100,6 +100,7 @@
 /* The mode of defrag */
 #define DETAIL			0x01
 #define STATISTIC		0x02
+#define DIAGNOSTIC		0x04
 
 #define DEVNAME			0
 #define DIRNAME			1
@@ -130,7 +131,7 @@
 
 /* The following macros are error message */
 #define MSG_USAGE		\
-"Usage	: e4defrag [-v] file...| directory...| device...\n\
+"Usage	: e4defrag [-v[v]] file...| directory...| device...\n\
 	: e4defrag  -c  file...| directory...| device...\n"
 
 #define NGMSG_EXT4		"Filesystem is not ext4 filesystem"
@@ -192,6 +193,12 @@ enum defrag_outcome {
 	RESULT_EXCLUDED, RESULT_COUNT
 };
 
+struct layout_measurement {
+	unsigned int extents, data_runs, spacing_runs, groups;
+	__u64 blocks, bridged_holes;
+	int valid;
+};
+
 struct defrag_result {
 	enum defrag_outcome outcome;
 	const char *reason, *stage, *cleanup_stage;
@@ -201,28 +208,27 @@ struct defrag_result {
 	__u64 moved_blocks;
 	unsigned int move_calls, mapping_retries;
 	double elapsed;
+	struct layout_measurement source, donor, after_layout;
+	int source_seen, donor_seen, after_seen, comparable;
+	unsigned int allocation_attempts;
+	__u64 requested_bytes, max_request_bytes;
 };
 
 static unsigned int outcomes[RESULT_COUNT];
+static unsigned int measured_files, unmeasured_files;
 static int had_error;
 
-/* Quote paths byte-for-byte so filenames cannot inject terminal controls or
- * extra log records.  This also represents non-UTF-8 filenames unambiguously.
- */
+/* Preserve ordinary path spelling; escape controls in progress/log records. */
 static void print_path(const char *path)
 {
 	const unsigned char *p = (const unsigned char *)path;
 
-	putchar('"');
 	for (; *p; p++) {
-		if (*p == '"' || *p == '\\')
-			printf("\\%c", *p);
-		else if (*p < 32 || *p >= 127)
+		if (*p < 32 || *p == 127)
 			printf("\\x%02x", *p);
 		else
 			putchar(*p);
 	}
-	putchar('"');
 }
 
 static int result_error(struct defrag_result *result, const char *stage,
@@ -256,10 +262,77 @@ static void print_phase(const char *file, const char *phase)
 	if (!interactive_output)
 		return;
 	reset_progress_line();
-	printf("[%u/%u] ", defraged_file_count, total_count);
+	printf("[%u/%u]", defraged_file_count, total_count);
 	print_path(file);
 	printf(": %s", phase);
 	fflush(stdout);
+}
+
+static void format_size(char size[32], __u64 bytes)
+{
+	static const char *units[] = { "B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB" };
+	double value = bytes;
+	unsigned int unit = 0;
+
+	while (value >= 1024 && unit < 6) {
+		value /= 1024;
+		unit++;
+	}
+	if (unit)
+		snprintf(size, 32, "%.1f %s", value, units[unit]);
+	else
+		snprintf(size, 32, "%llu B", (unsigned long long)bytes);
+}
+
+static void print_layout(const char *label, const struct layout_measurement *m)
+{
+	printf("\t%-12s%10u", label, m->extents);
+	if (m->valid)
+		printf("%12u%15u\n", m->data_runs, m->spacing_runs);
+	else
+		printf("%12s%15s\n", "unknown", "unknown");
+}
+
+static void report_diagnostics(const struct defrag_result *result)
+{
+	char total[32], largest[32], holes[32], moved[32];
+
+	if (!result->source_seen)
+		return;
+	printf("\t%-12s%10s%12s%15s\n", "Layout", "Extents", "Data runs", "Spacing runs");
+	print_layout("Before", &result->source);
+	if (result->donor_seen)
+		print_layout("Donor", &result->donor);
+	if (result->after_seen) {
+		print_layout("After", &result->after_layout);
+		if (!result->comparable)
+			printf("\tPlacement comparison unavailable: allocated logical ranges changed.\n");
+	}
+	if (!result->source.valid ||
+	    (result->donor_seen && !result->donor.valid) ||
+	    (result->after_seen && !result->after_layout.valid))
+		printf("\tPhysical placement unavailable for one or more maps (FIEMAP flags or alignment).\n");
+	format_size(holes, result->source.bridged_holes * block_size);
+	format_size(total, result->source.blocks * block_size);
+	printf("\tSource data occupy %s.\n", total);
+	printf("\tGrouped across %s of small holes in %u allocation group%s.\n", holes,
+	       result->source.groups, result->source.groups == 1 ? "" : "s");
+	format_size(total, result->requested_bytes);
+	format_size(largest, result->max_request_bytes);
+	printf("\tDonor space requested: %s in %u request%s; largest %s.\n", total,
+	       result->allocation_attempts, result->allocation_attempts == 1 ? "" : "s",
+	       largest);
+	format_size(moved, result->moved_blocks * block_size);
+	printf("\t%s %s in %.3f seconds (%u move call%s, %u mapping %s).\n",
+	       result->moved_unknown ? "Confirmed movement:" : "Moved",
+	       moved, result->elapsed, result->move_calls,
+	       result->move_calls == 1 ? "" : "s", result->mapping_retries,
+	       result->mapping_retries == 1 ? "retry" : "retries");
+	printf("\tGroup holes up to 7 blocks (%d bytes per block); move window up to 64 MiB.\n",
+	       block_size);
+#ifdef ALIGN
+	printf("\tAllocation lengths padded to 64 KiB for files over 8 KiB allocated, except the last group.\n");
+#endif
 }
 
 static void report_result(const char *file, const struct defrag_result *result)
@@ -267,57 +340,93 @@ static void report_result(const char *file, const struct defrag_result *result)
 	static const char *names[] = {
 		"MOVED", "UNCHANGED", "SKIPPED", "FAILED", "EXCLUDED"
 	};
+	int after = result->after;
 
 	outcomes[result->outcome]++;
 	if (result->outcome == RESULT_FAILED)
 		had_error = 1;
 	if (result->outcome == RESULT_EXCLUDED)
 		return;
-	reset_progress_line();
-	print_path(file);
-	printf(": %s", names[result->outcome]);
-	if (result->reason)
-		printf(" (%s)", result->reason);
-	if (result->stage) {
-		printf(" (%s", result->stage);
-		if (result->error)
-			printf(": %s", strerror(result->error));
-		putchar(')');
-	}
+	/* A skipped file was not modified by this operation. */
+	if (result->outcome == RESULT_SKIPPED)
+		after = result->before;
 	if ((mode_flag & DETAIL) && result->before >= 0) {
-		printf("; extents %d -> ", result->before);
-		if (result->after >= 0)
-			printf("%d", result->after);
+		if (after >= 0) {
+			measured_files++;
+			extents_before_defrag += result->before;
+			extents_after_defrag += after;
+			frag_files_before_defrag += result->before > 1;
+			frag_files_after_defrag += after > 1;
+		} else
+			unmeasured_files++;
+	}
+	reset_progress_line();
+	printf("[%u/%u]", defraged_file_count, total_count);
+	print_path(file);
+	printf(":\t");
+	if (result->outcome != RESULT_FAILED)
+		printf("100%%");
+	if ((mode_flag & DETAIL) && result->before >= 0) {
+		printf("  extents: %d -> ", result->before);
+		if (after >= 0)
+			printf("%d", after);
 		else
 			printf("unknown");
-		if (result->best >= 0)
-			printf("; estimated target %d%s", result->best,
-			       blocks_per_group ? "" : " (fallback)");
 	}
-	if ((mode_flag & DETAIL) || result->moved_blocks || result->moved_unknown)
-		printf("; moved %llu bytes%s",
-		       (unsigned long long)result->moved_blocks * block_size,
-		       result->moved_unknown ? " (known minimum; total unknown)" : "");
-	if (mode_flag & DETAIL)
-		printf("; elapsed %.3f s", result->elapsed);
+	if ((mode_flag & DIAGNOSTIC) && result->best >= 0)
+		printf(" (estimated best: %d%s)", result->best,
+		       blocks_per_group ? "" : ", fallback");
+	printf("\t[ %s ]\n", (mode_flag & DIAGNOSTIC) ? names[result->outcome] :
+	       (result->outcome == RESULT_FAILED ? "NG" : "OK"));
+	if ((mode_flag & DIAGNOSTIC) && result->reason)
+		printf("\t%s.\n", result->reason);
+	if (result->stage) {
+		printf("\tError while %s", result->stage);
+		if (result->error)
+			printf(": %s", strerror(result->error));
+		putchar('\n');
+	}
+	if (result->outcome == RESULT_FAILED && result->moved_blocks)
+		printf("\t%llu bytes already moved before the failure.\n",
+		       (unsigned long long)result->moved_blocks * block_size);
+	if (result->moved_unknown)
+		printf("\tTotal movement is unknown; only confirmed blocks are counted.\n");
 	if (result->measure_error)
-		printf("; warning: after-map unavailable: %s",
+		printf("\tWarning: final extent count unavailable: %s\n",
 		       strerror(result->measure_error));
 	if (result->cache_error)
-		printf("; warning: cache advice: %s", strerror(result->cache_error));
+		printf("\tWarning: cache advice failed: %s\n", strerror(result->cache_error));
 	if (result->cleanup_error)
-		printf("; warning: %s: %s", result->cleanup_stage,
+		printf("\tWarning while %s: %s\n", result->cleanup_stage,
 		       strerror(result->cleanup_error));
-	putchar('\n');
+	if (mode_flag & DIAGNOSTIC)
+		report_diagnostics(result);
 	fflush(stdout);
 }
 
 static void report_summary(void)
 {
-	printf("Summary: %u moved, %u unchanged, %u skipped, %u failed"
-	       "; %u non-file entries excluded\n", outcomes[RESULT_MOVED],
-	       outcomes[RESULT_UNCHANGED], outcomes[RESULT_SKIPPED],
-	       outcomes[RESULT_FAILED], outcomes[RESULT_EXCLUDED]);
+	unsigned int success = outcomes[RESULT_MOVED] + outcomes[RESULT_UNCHANGED] +
+		outcomes[RESULT_SKIPPED];
+	unsigned int files = success + outcomes[RESULT_FAILED];
+
+	printf("\n\tSuccess:\t\t\t[ %u/%u ]\n", success, files);
+	printf("\tFailure:\t\t\t[ %u/%u ]\n", outcomes[RESULT_FAILED], files);
+	if ((mode_flag & DETAIL) && measured_files) {
+		printf("\tTotal extents:\t\t\t%4d->%d\n",
+		       extents_before_defrag, extents_after_defrag);
+		printf("\tFragmented percentage:\t\t%3llu%%->%llu%%\n",
+		       (unsigned long long)frag_files_before_defrag * 100 / measured_files,
+		       (unsigned long long)frag_files_after_defrag * 100 / measured_files);
+	}
+	if (unmeasured_files)
+		printf("\tFiles missing before/after measurements: %u\n", unmeasured_files);
+	if (mode_flag & DIAGNOSTIC) {
+		printf("\tMoved %u, unchanged %u, skipped %u, failed %u.\n",
+		       outcomes[RESULT_MOVED], outcomes[RESULT_UNCHANGED],
+		       outcomes[RESULT_SKIPPED], outcomes[RESULT_FAILED]);
+		printf("\tExcluded %u non-file directory entries.\n", outcomes[RESULT_EXCLUDED]);
+	}
 }
 
 
@@ -857,6 +966,11 @@ static int get_file_extents(int fd, struct fiemap_extent_list **ext_list_head)
 						/ block_size;
 			ext_list->data.len = ext_buf[i].fe_length
 						/ block_size;
+			ext_list->data.flags = ext_buf[i].fe_flags;
+			if (ext_buf[i].fe_logical % block_size ||
+			    ext_buf[i].fe_physical % block_size ||
+			    ext_buf[i].fe_length % block_size)
+				ext_list->data.flags |= FIEMAP_EXTENT_NOT_ALIGNED;
 
 			/* First element */
 			if (*ext_list_head == NULL) {
@@ -1038,6 +1152,82 @@ static void free_exts_group(struct fiemap_extent_group *ext_group_head)
 	free(ext_group_head);
 }
 
+/* Keep physical locality, logical continuity, and sparse spacing distinct. */
+static struct layout_measurement measure_layout(struct fiemap_extent_list *head)
+{
+	struct layout_measurement m = { .valid = 1 };
+	struct fiemap_extent_list *p = head, *prev = NULL;
+	const __u32 unsuitable = FIEMAP_EXTENT_UNKNOWN | FIEMAP_EXTENT_DELALLOC |
+		FIEMAP_EXTENT_ENCODED | FIEMAP_EXTENT_NOT_ALIGNED |
+		FIEMAP_EXTENT_DATA_INLINE | FIEMAP_EXTENT_DATA_TAIL;
+
+	if (!head)
+		return m;
+	do {
+		__u64 gap = 0;
+		int adjacent = 0, spaced = 0;
+
+		m.extents++;
+		m.blocks += p->data.len;
+		if (p->data.flags & unsuitable)
+			m.valid = 0;
+		if (prev) {
+			__u64 logical_end = prev->data.logical + prev->data.len;
+			__u64 physical_end = prev->data.physical + prev->data.len;
+
+			if (p->data.logical < logical_end) {
+				m.valid = 0;
+				gap = ~(__u64)0;
+			} else
+				gap = p->data.logical - logical_end;
+			adjacent = !gap && p->data.physical == physical_end;
+			/* Avoid unsigned wraparound on a backward physical jump. */
+			spaced = gap < 8 && p->data.physical >= physical_end &&
+				 p->data.physical - physical_end == gap;
+		}
+		if (!prev || gap >= 8)
+			m.groups++;
+		else
+			m.bridged_holes += gap;
+		if (!adjacent)
+			m.data_runs++;
+		if (!spaced)
+			m.spacing_runs++;
+		prev = p;
+		p = p->next;
+	} while (p != head);
+	return m;
+}
+
+static void next_allocated_range(struct fiemap_extent_list *head,
+	struct fiemap_extent_list **cursor, __u64 *start, __u64 *end)
+{
+	struct fiemap_extent_list *p = *cursor;
+
+	*start = p->data.logical;
+	do {
+		*end = p->data.logical + p->data.len;
+		p = p->next;
+	} while (p != head && p->data.logical == *end);
+	*cursor = p == head ? NULL : p;
+}
+
+/* Splitting an extent does not change the allocated logical coverage. */
+static int same_logical_coverage(struct fiemap_extent_list *a,
+				 struct fiemap_extent_list *b)
+{
+	struct fiemap_extent_list *pa = a, *pb = b;
+	__u64 astart, aend, bstart, bend;
+
+	while (pa && pb) {
+		next_allocated_range(a, &pa, &astart, &aend);
+		next_allocated_range(b, &pb, &bstart, &bend);
+		if (astart != bstart || aend != bend)
+			return 0;
+	}
+	return !pa && !pb;
+}
+
 /*
  * get_best_count() -	Get the file best extents count.
  *
@@ -1184,6 +1374,11 @@ static int file_statistic(const char *file, const struct stat64 *buf,
 
 	/* Count file fragments before defrag */
 	now_ext_count = get_logical_count(logical_list_head);
+	if (mode_flag & DIAGNOSTIC) {
+		struct layout_measurement layout = measure_layout(logical_list_head);
+		printf("\t%-12s%10s%12s%15s\n", "Layout", "Extents", "Data runs", "Spacing runs");
+		print_layout("Current", &layout);
+	}
 
 	if (current_uid == ROOT_UID) {
 		/* Calculate the size per extent */
@@ -1337,9 +1532,9 @@ static void print_progress(const char *file, ext2_loff_t start,
 	if (!interactive_output)
 		return;
 	reset_progress_line();
-	printf("[%u/%u] ", defraged_file_count, total_count);
+	printf("[%u/%u]", defraged_file_count, total_count);
 	print_path(file);
-	printf(": moving %3d%%", min(percent, 100));
+	printf(":\t%3d%%", min(percent, 100));
 	fflush(stdout);
 
 	return;
@@ -1523,6 +1718,10 @@ static int file_defrag(const char *file, const struct stat64 *buf,
 		goto out;
 	}
 	result.before = get_logical_count(orig_logical);
+	if (mode_flag & DIAGNOSTIC) {
+		result.source = measure_layout(orig_logical);
+		result.source_seen = 1;
+	}
 	blk_count = get_file_blocks(orig_logical);
 	if (file_check(fd, buf, blk_count, &result) < 0)
 		goto out;
@@ -1563,6 +1762,10 @@ static int file_defrag(const char *file, const struct stat64 *buf,
 #ifdef DEBUG
 		fprintf(stderr, "Allocate: %llu\n", (unsigned long long)alloc_len);
 #endif
+		result.allocation_attempts++;
+		result.requested_bytes += alloc_len;
+		if ((__u64)alloc_len > result.max_request_bytes)
+			result.max_request_bytes = alloc_len;
 		if (fallocate(donor_fd, 0,
 			      (ext2_loff_t)group->start->data.logical * block_size,
 			      alloc_len) < 0) {
@@ -1580,6 +1783,10 @@ static int file_defrag(const char *file, const struct stat64 *buf,
 		result_error(&result, "sorting donor extents", errno);
 		goto out;
 	}
+	if (mode_flag & DIAGNOSTIC) {
+		result.donor = measure_layout(donor_logical);
+		result.donor_seen = 1;
+	}
 	if (join_extents(donor_logical, &donor_groups) < 0) {
 		result_error(&result, "grouping donor extents", errno);
 		goto out;
@@ -1596,7 +1803,22 @@ static int file_defrag(const char *file, const struct stat64 *buf,
 	ret = call_defrag(fd, donor_fd, file, buf, donor_groups, &result);
 	if (ret == 0)
 		result.outcome = result.moved_blocks ? RESULT_MOVED : RESULT_UNCHANGED;
-	if (mode_flag & DETAIL) {
+	if (mode_flag & DIAGNOSTIC) {
+		struct fiemap_extent_list *after_physical = NULL, *after = NULL;
+
+		print_phase(file, "measuring placement");
+		if (get_file_extents(fd, &after_physical) < 0 ||
+		    change_physical_to_logical(&after_physical, &after) < 0)
+			result.measure_error = errno;
+		else {
+			result.after = get_logical_count(after);
+			result.after_layout = measure_layout(after);
+			result.after_seen = 1;
+			result.comparable = same_logical_coverage(orig_logical, after);
+		}
+		free_ext(after_physical);
+		free_ext(after);
+	} else if (mode_flag & DETAIL) {
 		print_phase(file, "measuring result");
 		result.after = file_frag_count(fd);
 		if (result.after < 0)
@@ -1662,6 +1884,8 @@ int main(int argc, char *argv[])
 	while ((opt = getopt(argc, argv, "vc")) != EOF) {
 		switch (opt) {
 		case 'v':
+			if (mode_flag & DETAIL)
+				mode_flag |= DIAGNOSTIC;
 			mode_flag |= DETAIL;
 			break;
 		case 'c':
@@ -1680,6 +1904,7 @@ int main(int argc, char *argv[])
 	/* Main process */
 	for (i = optind; i < argc; i++) {
 		memset(outcomes, 0, sizeof(outcomes));
+		measured_files = unmeasured_files = 0;
 		succeed_cnt = 0;
 		regular_count = 0;
 		total_count = 0;

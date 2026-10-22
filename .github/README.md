@@ -23,8 +23,9 @@ for the current algorithm, the changes made during the bug fixes, the original
 alignment experiment, and proposed runtime controls.
 
 See [Status and verbosity assessment](../doc/E4DEFRAG-STATUS-OUTPUT.md)
-for current output limitations and proposed status labels, diagnostic levels,
-and reporting of sparse-file placement. These output changes are proposals.
+for the status and diagnostic design and its implementation updates.
+Normal output and `-v` retain the familiar upstream result lines; `-vv` adds
+explicit action statuses, allocation details, and sparse-placement diagnostics.
 
 These e4defrag changes are experimental and should be tested before use.
 Fork-specific e4defrag bugs are the fork author's responsibility, not
