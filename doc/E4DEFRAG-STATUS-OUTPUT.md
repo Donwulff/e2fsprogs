@@ -4,6 +4,12 @@ Assessment of `defrag-mergesort` at `a7f8f5c5`, compared with the supplied
 older verbosity patch and the locally merged upstream. This is a proposal;
 it does not change program output, accepted options, or allocation policy.
 
+Implementation update: explicit action results, partial-movement reporting,
+`-v` measurements, separate outcome counts, and failure-sensitive exit status
+are now implemented. Optional measurement failures are warnings. The original
+comparison below describes the pre-change behavior; later diagnostic levels
+and machine output remain proposals until noted otherwise.
+
 Recommendation: show the action and any failure reason by default, retain
 `-v` for measured before/after results, and add `-vv` for allocation and
 placement diagnostics. Treat a future machine-readable format as a separate

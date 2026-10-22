@@ -43,6 +43,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 #include <ext2fs/ext2_types.h>
 #include <ext2fs/ext2fs.h>
@@ -186,6 +187,55 @@ static __u32 feature_incompat;
 static ext4_fsblk_t	files_block_count;
 static struct frag_statistic_ino	frag_rank[SHOW_FRAG_FILES];
 
+enum defrag_outcome {
+	RESULT_MOVED, RESULT_UNCHANGED, RESULT_SKIPPED, RESULT_FAILED,
+	RESULT_EXCLUDED, RESULT_COUNT
+};
+
+struct defrag_result {
+	enum defrag_outcome outcome;
+	const char *reason, *stage, *cleanup_stage;
+	int error, measure_error, cache_error, cleanup_error;
+	int before, after, best;
+	int moved_unknown;
+	__u64 moved_blocks;
+	unsigned int move_calls, mapping_retries;
+	double elapsed;
+};
+
+static unsigned int outcomes[RESULT_COUNT];
+static int had_error;
+
+/* Quote paths byte-for-byte so filenames cannot inject terminal controls or
+ * extra log records.  This also represents non-UTF-8 filenames unambiguously.
+ */
+static void print_path(const char *path)
+{
+	const unsigned char *p = (const unsigned char *)path;
+
+	putchar('"');
+	for (; *p; p++) {
+		if (*p == '"' || *p == '\\')
+			printf("\\%c", *p);
+		else if (*p < 32 || *p >= 127)
+			printf("\\x%02x", *p);
+		else
+			putchar(*p);
+	}
+	putchar('"');
+}
+
+static int result_error(struct defrag_result *result, const char *stage,
+			int error)
+{
+	result->outcome = RESULT_FAILED;
+	result->reason = NULL;
+	result->stage = stage;
+	result->error = error;
+	errno = error;
+	return -1;
+}
+
 static void init_output(void)
 {
 	const char *term = getenv("TERM");
@@ -199,6 +249,75 @@ static void reset_progress_line(void)
 	/* Redraw the current line only when stdout supports terminal output. */
 	if (interactive_output)
 		fputs("\r\033[K", stdout);
+}
+
+static void print_phase(const char *file, const char *phase)
+{
+	if (!interactive_output)
+		return;
+	reset_progress_line();
+	printf("[%u/%u] ", defraged_file_count, total_count);
+	print_path(file);
+	printf(": %s", phase);
+	fflush(stdout);
+}
+
+static void report_result(const char *file, const struct defrag_result *result)
+{
+	static const char *names[] = {
+		"MOVED", "UNCHANGED", "SKIPPED", "FAILED", "EXCLUDED"
+	};
+
+	outcomes[result->outcome]++;
+	if (result->outcome == RESULT_FAILED)
+		had_error = 1;
+	if (result->outcome == RESULT_EXCLUDED)
+		return;
+	reset_progress_line();
+	print_path(file);
+	printf(": %s", names[result->outcome]);
+	if (result->reason)
+		printf(" (%s)", result->reason);
+	if (result->stage) {
+		printf(" (%s", result->stage);
+		if (result->error)
+			printf(": %s", strerror(result->error));
+		putchar(')');
+	}
+	if ((mode_flag & DETAIL) && result->before >= 0) {
+		printf("; extents %d -> ", result->before);
+		if (result->after >= 0)
+			printf("%d", result->after);
+		else
+			printf("unknown");
+		if (result->best >= 0)
+			printf("; estimated target %d%s", result->best,
+			       blocks_per_group ? "" : " (fallback)");
+	}
+	if ((mode_flag & DETAIL) || result->moved_blocks || result->moved_unknown)
+		printf("; moved %llu bytes%s",
+		       (unsigned long long)result->moved_blocks * block_size,
+		       result->moved_unknown ? " (known minimum; total unknown)" : "");
+	if (mode_flag & DETAIL)
+		printf("; elapsed %.3f s", result->elapsed);
+	if (result->measure_error)
+		printf("; warning: after-map unavailable: %s",
+		       strerror(result->measure_error));
+	if (result->cache_error)
+		printf("; warning: cache advice: %s", strerror(result->cache_error));
+	if (result->cleanup_error)
+		printf("; warning: %s: %s", result->cleanup_stage,
+		       strerror(result->cleanup_error));
+	putchar('\n');
+	fflush(stdout);
+}
+
+static void report_summary(void)
+{
+	printf("Summary: %u moved, %u unchanged, %u skipped, %u failed"
+	       "; %u non-file entries excluded\n", outcomes[RESULT_MOVED],
+	       outcomes[RESULT_UNCHANGED], outcomes[RESULT_SKIPPED],
+	       outcomes[RESULT_FAILED], outcomes[RESULT_EXCLUDED]);
 }
 
 
@@ -346,7 +465,7 @@ static int calc_entry_counts(const char *file EXT2FS_ATTR((unused)),
 		const struct stat64 *buf, int flag EXT2FS_ATTR((unused)),
 		struct FTW *ftwbuf EXT2FS_ATTR((unused)))
 {
-	if (S_ISREG(buf->st_mode))
+	if (flag != FTW_NS && S_ISREG(buf->st_mode))
 		regular_count++;
 
 	total_count++;
@@ -426,9 +545,8 @@ static int page_in_core(int fd, struct move_extent defrag_data,
  * @page_num:		page number.
  */
 static int defrag_fadvise(int fd, struct move_extent defrag_data,
-		   unsigned char *vec, unsigned int page_num)
+		   unsigned char *vec, unsigned int page_num, int *cache_error)
 {
-	int	flag = 1;
 	long	pagesize = sysconf(_SC_PAGESIZE);
 	int	fadvise_flag = POSIX_FADV_DONTNEED;
 	int	sync_flag = SYNC_FILE_RANGE_WAIT_BEFORE |
@@ -460,10 +578,8 @@ static int defrag_fadvise(int fd, struct move_extent defrag_data,
 		}
 		if ((errno = posix_fadvise(fd, offset,
 					   pagesize, fadvise_flag)) != 0) {
-			if ((mode_flag & DETAIL) && flag) {
-				perror("\tFailed to fadvise");
-				flag = 0;
-			}
+			if (!*cache_error)
+				*cache_error = errno;
 		}
 		offset += pagesize;
 	}
@@ -475,33 +591,20 @@ static int defrag_fadvise(int fd, struct move_extent defrag_data,
  * check_free_size() -	Check if there's enough disk space.
  *
  * @fd:			defrag target file's descriptor.
- * @file:		file name.
  * @blk_count:		file blocks.
  */
-static int check_free_size(int fd, const char *file, ext4_fsblk_t blk_count)
+static int check_free_size(int fd, ext4_fsblk_t blk_count)
 {
-	ext4_fsblk_t	free_blk_count;
-	struct statfs64	fsbuf;
+	struct statfs64 fsbuf;
+	ext4_fsblk_t free_blocks;
 
-	if (fstatfs64(fd, &fsbuf) < 0) {
-		if (mode_flag & DETAIL) {
-			PRINT_FILE_NAME(file);
-			PRINT_ERR_MSG_WITH_ERRNO(
-				"Failed to get filesystem information");
-		}
+	if (fstatfs64(fd, &fsbuf) < 0)
 		return -1;
-	}
-
-	/* Compute free space for root and normal user separately */
-	if (current_uid == ROOT_UID)
-		free_blk_count = fsbuf.f_bfree;
-	else
-		free_blk_count = fsbuf.f_bavail;
-
-	if (free_blk_count >= blk_count)
+	free_blocks = current_uid == ROOT_UID ? fsbuf.f_bfree : fsbuf.f_bavail;
+	if (free_blocks >= blk_count)
 		return 0;
-
-	return -ENOSPC;
+	errno = ENOSPC;
+	return -1;
 }
 
 /*
@@ -534,69 +637,34 @@ static int file_frag_count(int fd)
  *
  * @fd:			defrag target file's descriptor.
  * @buf:		a pointer of the struct stat64.
- * @file:		file name.
- * @extents:		file extents.
  * @blk_count:		file blocks.
+ * @result:		eligibility decision or failure.
  */
-static int file_check(int fd, const struct stat64 *buf, const char *file,
-		int extents, ext4_fsblk_t blk_count)
+static int file_check(int fd, const struct stat64 *buf,
+		ext4_fsblk_t blk_count, struct defrag_result *result)
 {
-	int	ret;
-	struct flock	lock;
-
-	/* Write-lock check is more reliable */
-	lock.l_type = F_WRLCK;
-	lock.l_start = 0;
-	lock.l_whence = SEEK_SET;
-	lock.l_len = 0;
-
-	/* Free space */
-	ret = check_free_size(fd, file, blk_count);
-	if (ret < 0) {
-		if ((mode_flag & DETAIL) && ret == -ENOSPC) {
-			reset_progress_line();
-			printf("[%u/%u] \"%s\"\t\t"
-				"  extents: %d -> %d\n", defraged_file_count,
-				total_count, file, extents, extents);
-			IN_FTW_PRINT_ERR_MSG(
-			"Defrag size is larger than filesystem's free space");
-		}
-		return -1;
-	}
-
-	/* Access authority */
-	if (current_uid != ROOT_UID &&
-		buf->st_uid != current_uid) {
-		if (mode_flag & DETAIL) {
-			reset_progress_line();
-			printf("[%u/%u] \"%s\"\t\t"
-				"  extents: %d -> %d\n", defraged_file_count,
-				total_count, file, extents, extents);
-			IN_FTW_PRINT_ERR_MSG(
-				"File is not current user's file"
-				" or current user is not root");
-		}
-		return -1;
-	}
-
 #ifndef NOLOCK
-	/* Lock status */
-	if (fcntl(fd, F_GETLK, &lock) < 0) {
-		if (mode_flag & DETAIL) {
-			PRINT_FILE_NAME(file);
-			PRINT_ERR_MSG_WITH_ERRNO(
-				"Failed to get lock information");
-		}
+	struct flock lock = {0};
+#endif
+
+	if (check_free_size(fd, blk_count) < 0)
+		return result_error(result, "checking free space", errno);
+	if (current_uid != ROOT_UID && buf->st_uid != current_uid) {
+		result->outcome = RESULT_SKIPPED;
+		result->reason = "file belongs to another user";
 		return -1;
-	} else if (lock.l_type != F_UNLCK) {
-		if (mode_flag & DETAIL) {
-			PRINT_FILE_NAME(file);
-			IN_FTW_PRINT_ERR_MSG("File has been locked");
-		}
+	}
+#ifndef NOLOCK
+	lock.l_type = F_WRLCK;
+	lock.l_whence = SEEK_SET;
+	if (fcntl(fd, F_GETLK, &lock) < 0)
+		return result_error(result, "checking file lock", errno);
+	if (lock.l_type != F_UNLCK) {
+		result->outcome = RESULT_SKIPPED;
+		result->reason = "file locked";
 		return -1;
 	}
 #endif
-
 	return 0;
 }
 
@@ -771,8 +839,12 @@ static int get_file_extents(int fd, struct fiemap_extent_list **ext_list_head)
 		fiemap_buf->fm_start = pos;
 		memset(ext_buf, 0, ext_buf_size);
 		ret = ioctl(fd, FS_IOC_FIEMAP, fiemap_buf);
-		if (ret < 0 || fiemap_buf->fm_mapped_extents == 0)
+		if (ret < 0)
 			goto out;
+		if (fiemap_buf->fm_mapped_extents == 0) {
+			errno = ENODATA;
+			goto out;
+		}
 		for (i = 0; i < fiemap_buf->fm_mapped_extents; i++) {
 			ext_list = NULL;
 			ext_list = malloc(sizeof(struct fiemap_extent_list));
@@ -1014,6 +1086,13 @@ static int file_statistic(const char *file, const struct stat64 *buf,
 	struct fiemap_extent_list *physical_list_head = NULL;
 	struct fiemap_extent_list *logical_list_head = NULL;
 
+	if (flag == FTW_NS || flag == FTW_DNR) {
+		struct defrag_result result = { .outcome = RESULT_FAILED,
+			.stage = "reading directory entry", .before = -1 };
+		report_result(file, &result);
+		return 0;
+	}
+
 	defraged_file_count++;
 	if (defraged_file_count > total_count)
 		total_count = defraged_file_count;
@@ -1075,20 +1154,18 @@ static int file_statistic(const char *file, const struct stat64 *buf,
 
 	fd = open64(file, O_RDONLY);
 	if (fd < 0) {
-		if (mode_flag & DETAIL) {
-			PRINT_FILE_NAME(file);
-			STATISTIC_ERR_MSG_WITH_ERRNO(NGMSG_FILE_OPEN);
-		}
+		struct defrag_result result = { .outcome = RESULT_FAILED,
+			.stage = "opening source", .error = errno, .before = -1 };
+		report_result(file, &result);
 		return 0;
 	}
 
 	/* Get file's physical extents  */
 	ret = get_file_extents(fd, &physical_list_head);
 	if (ret < 0) {
-		if (mode_flag & DETAIL) {
-			PRINT_FILE_NAME(file);
-			STATISTIC_ERR_MSG_WITH_ERRNO(NGMSG_FILE_EXTENT);
-		}
+		struct defrag_result result = { .outcome = RESULT_FAILED,
+			.stage = "reading source extents", .error = errno, .before = -1 };
+		report_result(file, &result);
 		goto out;
 	}
 
@@ -1099,10 +1176,9 @@ static int file_statistic(const char *file, const struct stat64 *buf,
 	ret = change_physical_to_logical(&physical_list_head,
 							&logical_list_head);
 	if (ret < 0) {
-		if (mode_flag & DETAIL) {
-			PRINT_FILE_NAME(file);
-			STATISTIC_ERR_MSG_WITH_ERRNO(NGMSG_FILE_EXTENT);
-		}
+		struct defrag_result result = { .outcome = RESULT_FAILED,
+			.stage = "sorting source extents", .error = errno, .before = -1 };
+		report_result(file, &result);
 		goto out;
 	}
 
@@ -1261,8 +1337,9 @@ static void print_progress(const char *file, ext2_loff_t start,
 	if (!interactive_output)
 		return;
 	reset_progress_line();
-	printf("[%u/%u]%s:\t%3d%%",
-		defraged_file_count, total_count, file, min(percent, 100));
+	printf("[%u/%u] ", defraged_file_count, total_count);
+	print_path(file);
+	printf(": moving %3d%%", min(percent, 100));
 	fflush(stdout);
 
 	return;
@@ -1278,13 +1355,14 @@ static void print_progress(const char *file, ext2_loff_t start,
  * @ext_list_head:	head of the extent list.
  */
 static int call_defrag(int fd, int donor_fd, const char *file,
-	const struct stat64 *buf, struct fiemap_extent_group *ext_list_head)
+	const struct stat64 *buf, struct fiemap_extent_group *ext_list_head,
+	struct defrag_result *result)
 {
 	ext2_loff_t	start = 0;
 	unsigned int	page_num;
 	unsigned char	*vec = NULL;
 	int	defraged_ret = 0;
-	int	move_errno;
+	int	move_errno, cleanup_errno;
 	__u64	group_end;
 	__u64	file_blocks = buf->st_size / block_size +
 			      (buf->st_size % block_size != 0);
@@ -1295,12 +1373,6 @@ static int call_defrag(int fd, int donor_fd, const char *file,
 
 	memset(&move_data, 0, sizeof(struct move_extent));
 	move_data.donor_fd = donor_fd;
-
-	/* Plain output keeps one status line, including on an early failure. */
-	if (!interactive_output) {
-		printf("[%u/%u]%s:", defraged_file_count, total_count, file);
-		fflush(stdout);
-	}
 
 	/* Print defrag progress */
 	print_progress(file, start, buf->st_size);
@@ -1325,24 +1397,23 @@ static int call_defrag(int fd, int donor_fd, const char *file,
 				if (ret == 0 || errno != ENOMEM ||
 				    move_data.len == 1)
 					break;
+				result->mapping_retries++;
 				move_data.len /= 2;
 				max_blocks = move_data.len;
 			}
-			if (ret < 0) {
-				if (mode_flag & DETAIL) {
-					printf("\n");
-					PRINT_ERR_MSG_WITH_ERRNO(
-							"Failed to get file map");
-				} else {
-					printf("\t[ NG ]\n");
-				}
-				return -1;
-			}
+			if (ret < 0)
+				return result_error(result, "mapping source pages", errno);
 
 			/* EXT4_IOC_MOVE_EXT */
 			defraged_ret =
 				ioctl(fd, EXT4_IOC_MOVE_EXT, &move_data);
 			move_errno = errno;
+			result->move_calls++;
+			/* EFAULT can prevent the kernel from copying back moved_len. */
+			if (defraged_ret < 0 && move_errno == EFAULT)
+				result->moved_unknown = 1;
+			else
+				result->moved_blocks += move_data.moved_len;
 #ifdef DEBUG
 			fprintf(stderr, "EXT4_IOC_MOVE_EXT: move_data.len: %llu, orig: %llu, donor: %llu, moved: %llu\n",
 				move_data.len,
@@ -1351,38 +1422,22 @@ static int call_defrag(int fd, int donor_fd, const char *file,
 				move_data.moved_len);
 #endif
 
-			/* Free pages */
-			ret = defrag_fadvise(fd, move_data, vec, page_num);
-			if (vec) {
-				free(vec);
-				vec = NULL;
-			}
-			if (ret < 0) {
-				if (mode_flag & DETAIL) {
-					printf("\n");
-					PRINT_ERR_MSG_WITH_ERRNO(
-						"Failed to free page");
-				} else {
-					printf("\t[ NG ]\n");
-				}
-				return -1;
-			}
-
+			/* Preserve a move failure if synchronization also fails. */
+			ret = defrag_fadvise(fd, move_data, vec, page_num,
+					    &result->cache_error);
+			cleanup_errno = errno;
+			free(vec);
+			vec = NULL;
 			if (defraged_ret < 0) {
-				errno = move_errno;
-				if (mode_flag & DETAIL) {
-					printf("\n");
-					PRINT_ERR_MSG_WITH_ERRNO(
-						"Failed to defrag with "
-						"EXT4_IOC_MOVE_EXT ioctl");
-					if (errno == ENOTTY)
-						printf("\tAt least 2.6.31-rc1 of "
-							"vanilla kernel is required\n");
-				} else {
-					printf("\t[ NG ]\n");
+				if (ret < 0) {
+					result->cleanup_stage = "synchronizing moved range";
+					result->cleanup_error = cleanup_errno;
 				}
-				return -1;
+				return result_error(result, "moving extents", move_errno);
 			}
+			if (ret < 0)
+				return result_error(result, "synchronizing moved range",
+						    cleanup_errno);
 			/* A successful ioctl processed the requested logical range.
 			 * moved_len counts allocated blocks only, excluding holes.
 			 */
@@ -1412,318 +1467,168 @@ static int call_defrag(int fd, int donor_fd, const char *file,
  * @ftwbuf:		the pointer of a struct FTW.
  */
 static int file_defrag(const char *file, const struct stat64 *buf,
-			int flag EXT2FS_ATTR((unused)),
-			struct FTW *ftwbuf EXT2FS_ATTR((unused)))
+			int flag, struct FTW *ftwbuf EXT2FS_ATTR((unused)))
 {
-	int	fd;
-	int	donor_fd = -1;
-	int	ret;
-	int	best;
-	int	file_frags_start, file_frags_end;
-	int	orig_physical_cnt, donor_physical_cnt = 0;
-	char	tmp_inode_name[PATH_MAX + 8];
-	ext4_fsblk_t			blk_count = 0;
-	struct fiemap_extent_list	*orig_list_physical = NULL;
-	struct fiemap_extent_list	*orig_list_logical = NULL;
-	struct fiemap_extent_list	*donor_list_physical = NULL;
-	struct fiemap_extent_list	*donor_list_logical = NULL;
-	struct fiemap_extent_group	*orig_group_head = NULL;
-	struct fiemap_extent_group	*orig_group_tmp = NULL;
-	struct fiemap_extent_group	*donor_group_head = NULL;
+	int fd = -1, donor_fd = -1, ret;
+	int orig_physical_cnt, donor_physical_cnt;
+	char tmp_inode_name[PATH_MAX + 8];
+	ext4_fsblk_t blk_count;
+	struct fiemap_extent_list *orig_physical = NULL, *orig_logical = NULL;
+	struct fiemap_extent_list *donor_physical = NULL, *donor_logical = NULL;
+	struct fiemap_extent_group *orig_groups = NULL, *group;
+	struct fiemap_extent_group *donor_groups = NULL;
+	struct defrag_result result = {
+		.outcome = RESULT_SKIPPED, .before = -1, .after = -1, .best = -1
+	};
+	struct timespec started = {0}, finished = {0};
 
+	clock_gettime(CLOCK_MONOTONIC, &started);
 	defraged_file_count++;
 	if (defraged_file_count > total_count)
 		total_count = defraged_file_count;
-
-	if ((mode_flag & DETAIL) && interactive_output) {
-		printf("[%u/%u]", defraged_file_count, total_count);
-		fflush(stdout);
+	if (flag == FTW_NS || flag == FTW_DNR) {
+		result_error(&result, "reading directory entry", 0);
+		goto out;
 	}
-
-	if (lost_found_dir[0] != '\0' &&
-	    !memcmp(file, lost_found_dir, strnlen(lost_found_dir, PATH_MAX))) {
-		if (mode_flag & DETAIL) {
-			PRINT_FILE_NAME(file);
-			IN_FTW_PRINT_ERR_MSG(NGMSG_LOST_FOUND);
-		}
-		return 0;
-	}
-
 	if (!S_ISREG(buf->st_mode)) {
-		if (mode_flag & DETAIL) {
-			PRINT_FILE_NAME(file);
-			IN_FTW_PRINT_ERR_MSG(NGMSG_FILE_UNREG);
-		}
-		return 0;
+		result.outcome = RESULT_EXCLUDED;
+		goto out;
 	}
-
-	/* Empty file */
+	if (lost_found_dir[0] &&
+	    !strncmp(file, lost_found_dir, strlen(lost_found_dir))) {
+		result.reason = "lost+found is excluded";
+		goto out;
+	}
 	if (buf->st_size == 0) {
-		if (mode_flag & DETAIL) {
-			PRINT_FILE_NAME(file);
-			IN_FTW_PRINT_ERR_MSG("File size is 0");
-		}
-		return 0;
+		result.reason = "empty file";
+		goto out;
 	}
-
-	/* Has 0 or 1 blocks, no point to defragment */
 	if (buf->st_blocks <= buf->st_blksize / 512) {
-		if (mode_flag & DETAIL) {
-			PRINT_FILE_NAME(file);
-			IN_FTW_PRINT_ERR_MSG("# of file blocks <= 1");
-		}
-		return 0;
+		result.reason = "at most one allocated block";
+		goto out;
 	}
-
+	print_phase(file, "inspecting source");
 	fd = open64(file, O_RDWR);
 	if (fd < 0) {
-		if (mode_flag & DETAIL) {
-			PRINT_FILE_NAME(file);
-			PRINT_ERR_MSG_WITH_ERRNO(NGMSG_FILE_OPEN);
-		}
-		return 0;
-	}
-
-	/* Get file's extents */
-	ret = get_file_extents(fd, &orig_list_physical);
-	if (ret < 0) {
-		if (mode_flag & DETAIL) {
-			PRINT_FILE_NAME(file);
-			PRINT_ERR_MSG_WITH_ERRNO(NGMSG_FILE_EXTENT);
-		}
+		result_error(&result, "opening source", errno);
 		goto out;
 	}
-
-	/* Get the count of file's continuous physical region */
-	orig_physical_cnt = get_physical_count(orig_list_physical);
-#ifdef DEBUG
-	printf("DEBUG: Original continuous fragments = %d\n", orig_physical_cnt);
-#endif
-
-	/* Change list from physical to logical */
-	ret = change_physical_to_logical(&orig_list_physical,
-							&orig_list_logical);
-	if (ret < 0) {
-		if (mode_flag & DETAIL) {
-			PRINT_FILE_NAME(file);
-			PRINT_ERR_MSG_WITH_ERRNO(NGMSG_FILE_EXTENT);
-		}
+	if (get_file_extents(fd, &orig_physical) < 0) {
+		result_error(&result, "reading source extents", errno);
 		goto out;
 	}
-
-	/* Count file fragments before defrag */
-	file_frags_start = get_logical_count(orig_list_logical);
-#ifdef DEBUG
-	printf("DEBUG: Original logical segments = %d\n", file_frags_start);
-#endif
-
-	blk_count = get_file_blocks(orig_list_logical);
-
-	if (file_check(fd, buf, file, file_frags_start, blk_count) < 0)
+	orig_physical_cnt = get_physical_count(orig_physical);
+	if (change_physical_to_logical(&orig_physical, &orig_logical) < 0) {
+		result_error(&result, "sorting source extents", errno);
 		goto out;
-
+	}
+	result.before = get_logical_count(orig_logical);
+	blk_count = get_file_blocks(orig_logical);
+	if (file_check(fd, buf, blk_count, &result) < 0)
+		goto out;
 	if (fsync(fd) < 0) {
-		if (mode_flag & DETAIL) {
-			PRINT_FILE_NAME(file);
-			PRINT_ERR_MSG_WITH_ERRNO("Failed to sync(fsync)");
-		}
+		result_error(&result, "synchronizing source", errno);
 		goto out;
 	}
-
-	best = get_best_count(blk_count);
-#ifdef DEBUG
-	printf("DEBUG: Best possible extents = %d\n", best);
-#endif
-
+	result.best = get_best_count(blk_count);
 #ifndef SHAKE
-	/* This would skip defragment if no improvement possible */
-	if (file_frags_start <= best)
-		goto check_improvement;
-#endif
-
-	/* Combine extents to group */
-	ret = join_extents(orig_list_logical, &orig_group_head);
-	if (ret < 0) {
-		if (mode_flag & DETAIL) {
-			PRINT_FILE_NAME(file);
-			PRINT_ERR_MSG_WITH_ERRNO(NGMSG_FILE_EXTENT);
-		}
+	if (result.before <= result.best) {
+		result.reason = "already meets estimated target";
+		result.after = result.before;
 		goto out;
 	}
-
-	/* Create donor inode */
-	memset(tmp_inode_name, 0, PATH_MAX + 8);
-	sprintf(tmp_inode_name, "%.*s.defrag",
-				(int)strnlen(file, PATH_MAX), file);
+#endif
+	if (join_extents(orig_logical, &orig_groups) < 0) {
+		result_error(&result, "grouping source extents", errno);
+		goto out;
+	}
+	print_phase(file, "allocating donor");
+	snprintf(tmp_inode_name, sizeof(tmp_inode_name), "%s.defrag", file);
 	donor_fd = open64(tmp_inode_name, O_WRONLY | O_CREAT | O_EXCL, S_IRUSR);
 	if (donor_fd < 0) {
-		if (mode_flag & DETAIL) {
-			PRINT_FILE_NAME(file);
-			if (errno == EEXIST)
-				PRINT_ERR_MSG_WITH_ERRNO(
-				"File is being defraged by other program");
-			else
-				PRINT_ERR_MSG_WITH_ERRNO(NGMSG_FILE_OPEN);
-		}
+		result_error(&result, "creating donor", errno);
 		goto out;
 	}
-
-	/* Unlink donor inode */
-	ret = unlink(tmp_inode_name);
-	if (ret < 0) {
-		if (mode_flag & DETAIL) {
-			PRINT_FILE_NAME(file);
-			PRINT_ERR_MSG_WITH_ERRNO("Failed to unlink");
-		}
+	if (unlink(tmp_inode_name) < 0) {
+		result_error(&result, "unlinking donor", errno);
 		goto out;
 	}
-
-	/* Allocate space for donor inode */
-	orig_group_tmp = orig_group_head;
+	group = orig_groups;
 	do {
-		ext2_loff_t alloc_len = (ext2_loff_t)orig_group_tmp->len * block_size;
+		ext2_loff_t alloc_len = (ext2_loff_t)group->len * block_size;
 #ifdef ALIGN
-		/* Round up if we have more than one unit; kernel should align and trim us
-		 * Don't pad last group for now, because we'll run out of source file data
-		 */
-		if(buf->st_blocks > 16 && orig_group_tmp->next != orig_group_head) {
+		if (buf->st_blocks > 16 && group->next != orig_groups)
 			alloc_len = ((alloc_len - 1) / 65536 + 1) * 65536;
-		}
 #endif
 #ifdef DEBUG
 		fprintf(stderr, "Allocate: %llu\n", (unsigned long long)alloc_len);
 #endif
-		ret = fallocate(donor_fd, 0,
-		  (ext2_loff_t)orig_group_tmp->start->data.logical * block_size,
-		  alloc_len);
-		if (ret < 0) {
-			if (mode_flag & DETAIL) {
-				PRINT_FILE_NAME(file);
-				PRINT_ERR_MSG_WITH_ERRNO("Failed to fallocate");
-			}
+		if (fallocate(donor_fd, 0,
+			      (ext2_loff_t)group->start->data.logical * block_size,
+			      alloc_len) < 0) {
+			result_error(&result, "allocating donor", errno);
 			goto out;
 		}
-
-		orig_group_tmp = orig_group_tmp->next;
-	} while (orig_group_tmp != orig_group_head);
-
-	/* Get donor inode's extents */
-	ret = get_file_extents(donor_fd, &donor_list_physical);
-	if (ret < 0) {
-		if (mode_flag & DETAIL) {
-			PRINT_FILE_NAME(file);
-			PRINT_ERR_MSG_WITH_ERRNO(NGMSG_FILE_EXTENT);
-		}
+		group = group->next;
+	} while (group != orig_groups);
+	if (get_file_extents(donor_fd, &donor_physical) < 0) {
+		result_error(&result, "reading donor extents", errno);
 		goto out;
 	}
-
-	/* Calculate donor inode's continuous physical region */
-	donor_physical_cnt = get_physical_count(donor_list_physical);
-#ifdef DEBUG
-	printf("DEBUG: Target continuous fragments = %d\n", donor_physical_cnt);
-#endif
-
-	/* Change donor extent list from physical to logical */
-	ret = change_physical_to_logical(&donor_list_physical,
-							&donor_list_logical);
-	if (ret < 0) {
-		if (mode_flag & DETAIL) {
-			PRINT_FILE_NAME(file);
-			PRINT_ERR_MSG_WITH_ERRNO(NGMSG_FILE_EXTENT);
-		}
+	donor_physical_cnt = get_physical_count(donor_physical);
+	if (change_physical_to_logical(&donor_physical, &donor_logical) < 0) {
+		result_error(&result, "sorting donor extents", errno);
 		goto out;
 	}
-#ifdef DEBUG
-	int donor_logical_cnt = get_logical_count(donor_list_logical);
-	printf("DEBUG: Target logical segments = %d\n", donor_logical_cnt);
-#endif
-
-	/* Combine extents to group */
-	ret = join_extents(donor_list_logical, &donor_group_head);
-	if (ret < 0) {
-		if (mode_flag & DETAIL) {
-			PRINT_FILE_NAME(file);
-			PRINT_ERR_MSG_WITH_ERRNO(NGMSG_FILE_EXTENT);
-		}
+	if (join_extents(donor_logical, &donor_groups) < 0) {
+		result_error(&result, "grouping donor extents", errno);
 		goto out;
 	}
-
-check_improvement:
-	if (mode_flag & DETAIL) {
-		if (file_frags_start != 1)
-			frag_files_before_defrag++;
-
-		extents_before_defrag += file_frags_start;
-	}
-
 #ifdef SHAKE
-	if (file_frags_start < best ||
-			orig_physical_cnt < donor_physical_cnt) {
+	if (result.before < result.best || orig_physical_cnt < donor_physical_cnt) {
 #else
-	if (file_frags_start <= best ||
-			orig_physical_cnt <= donor_physical_cnt) {
+	if (orig_physical_cnt <= donor_physical_cnt) {
 #endif
-		reset_progress_line();
-		printf("[%u/%u]%s:\t%3d%%",
-			defraged_file_count, total_count, file, 100);
-		if (mode_flag & DETAIL)
-			printf("  extents: %d -> %d (%d)",
-				file_frags_start, file_frags_start, best);
-
-		printf("\t[ NOT ]\n");
-		succeed_cnt++;
-
-		if (file_frags_start != 1)
-			frag_files_after_defrag++;
-
-		extents_after_defrag += file_frags_start;
+		result.reason = "donor not better by current heuristic";
+		result.after = result.before;
 		goto out;
 	}
-
-	/* Defrag the file */
-	ret = call_defrag(fd, donor_fd, file, buf, donor_group_head);
-	if (!interactive_output && ret == 0)
-		printf("\t100%%");
-
-	/* Count file fragments after defrag and print extents info */
+	ret = call_defrag(fd, donor_fd, file, buf, donor_groups, &result);
+	if (ret == 0)
+		result.outcome = result.moved_blocks ? RESULT_MOVED : RESULT_UNCHANGED;
 	if (mode_flag & DETAIL) {
-		file_frags_end = file_frag_count(fd);
-		if (file_frags_end < 0) {
-			printf("\n");
-			PRINT_ERR_MSG_WITH_ERRNO(NGMSG_FILE_INFO);
-			goto out;
-		}
-
-		if (file_frags_end != 1)
-			frag_files_after_defrag++;
-
-		extents_after_defrag += file_frags_end;
-
-		if (ret < 0)
-			goto out;
-
-		printf("  extents: %d -> %d (%d)",
-			file_frags_start, file_frags_end, best);
-		fflush(stdout);
+		print_phase(file, "measuring result");
+		result.after = file_frag_count(fd);
+		if (result.after < 0)
+			result.measure_error = errno;
 	}
-
-	if (ret < 0)
-		goto out;
-
-	printf("\t[ TRY ]\n");
-	fflush(stdout);
-	succeed_cnt++;
-
 out:
-	close(fd);
-	if (donor_fd != -1)
-		close(donor_fd);
-	free_ext(orig_list_physical);
-	free_ext(orig_list_logical);
-	free_ext(donor_list_physical);
-	free_ext(donor_list_logical);
-	free_exts_group(orig_group_head);
-	free_exts_group(donor_group_head);
+	if (donor_fd >= 0 && close(donor_fd) < 0) {
+		if (result.outcome != RESULT_FAILED)
+			result_error(&result, "closing donor", errno);
+		else {
+			result.cleanup_stage = "closing donor";
+			result.cleanup_error = errno;
+		}
+	}
+	if (fd >= 0 && close(fd) < 0) {
+		if (result.outcome != RESULT_FAILED)
+			result_error(&result, "closing source", errno);
+		else if (!result.cleanup_error) {
+			result.cleanup_stage = "closing source";
+			result.cleanup_error = errno;
+		}
+	}
+	free_ext(orig_physical);
+	free_ext(orig_logical);
+	free_ext(donor_physical);
+	free_ext(donor_logical);
+	free_exts_group(orig_groups);
+	free_exts_group(donor_groups);
+	clock_gettime(CLOCK_MONOTONIC, &finished);
+	result.elapsed = finished.tv_sec - started.tv_sec +
+		(finished.tv_nsec - started.tv_nsec) / 1000000000.0;
+	report_result(file, &result);
 	return 0;
 }
 
@@ -1746,6 +1651,7 @@ int main(int argc, char *argv[])
 	struct stat64	buf;
 	ext2_filsys fs = NULL;
 
+	had_error = 0;
 	init_output();
 	printf("e4defrag %s (%s)\n", E2FSPROGS_VERSION, E2FSPROGS_DATE);
 
@@ -1773,6 +1679,7 @@ int main(int argc, char *argv[])
 
 	/* Main process */
 	for (i = optind; i < argc; i++) {
+		memset(outcomes, 0, sizeof(outcomes));
 		succeed_cnt = 0;
 		regular_count = 0;
 		total_count = 0;
@@ -1798,12 +1705,14 @@ int main(int argc, char *argv[])
 #if BYTE_ORDER != BIG_ENDIAN && BYTE_ORDER != LITTLE_ENDIAN
 		PRINT_ERR_MSG("Endian's type is not big/little endian");
 		PRINT_FILE_NAME(argv[i]);
+		had_error = 1;
 		continue;
 #endif
 
 		if (lstat64(argv[i], &buf) < 0) {
 			perror(NGMSG_FILE_INFO);
 			PRINT_FILE_NAME(argv[i]);
+			had_error = 1;
 			continue;
 		}
 
@@ -1819,11 +1728,14 @@ int main(int argc, char *argv[])
 		if (S_ISBLK(buf.st_mode)) {
 			/* Block device */
 			strncpy(dev_name, argv[i], strnlen(argv[i], PATH_MAX));
-			if (get_mount_point(argv[i], dir_name, PATH_MAX) < 0)
+			if (get_mount_point(argv[i], dir_name, PATH_MAX) < 0) {
+				had_error = 1;
 				continue;
+			}
 			if (lstat64(dir_name, &buf) < 0) {
 				perror(NGMSG_FILE_INFO);
 				PRINT_FILE_NAME(argv[i]);
+				had_error = 1;
 				continue;
 			}
 			arg_type = DEVNAME;
@@ -1834,6 +1746,7 @@ int main(int argc, char *argv[])
 			/* Directory */
 			if (access(argv[i], R_OK) < 0) {
 				perror(argv[i]);
+				had_error = 1;
 				continue;
 			}
 			arg_type = DIRNAME;
@@ -1845,6 +1758,7 @@ int main(int argc, char *argv[])
 			/* Irregular file */
 			PRINT_ERR_MSG(NGMSG_FILE_UNREG);
 			PRINT_FILE_NAME(argv[i]);
+			had_error = 1;
 			continue;
 		}
 
@@ -1855,11 +1769,14 @@ int main(int argc, char *argv[])
 		 * filesystem type checked in get_mount_point()
 		 */
 		if (arg_type == FILENAME || arg_type == DIRNAME) {
-			if (is_ext4(argv[i], dev_name) < 0)
+			if (is_ext4(argv[i], dev_name) < 0) {
+				had_error = 1;
 				continue;
+			}
 			if (realpath(argv[i], dir_name) == NULL) {
 				perror("Couldn't get full path");
 				PRINT_FILE_NAME(argv[i]);
+				had_error = 1;
 				continue;
 			}
 		}
@@ -1882,6 +1799,7 @@ int main(int argc, char *argv[])
 			}
 		}
 
+		success_flag = 1;
 		switch (arg_type) {
 
 		case DIRNAME:
@@ -1907,6 +1825,7 @@ int main(int argc, char *argv[])
 						      PATH_MAX)] == '\0' ||
 				     dir_name[strnlen(lost_found_dir,
 						      PATH_MAX)] == '/')) {
+					had_error = 1;
 					PRINT_ERR_MSG(NGMSG_LOST_FOUND);
 					PRINT_FILE_NAME(argv[i]);
 					continue;
@@ -1923,7 +1842,11 @@ int main(int argc, char *argv[])
 					PATH_MAX - strlen(lost_found_dir));
 			}
 
-			nftw64(dir_name, calc_entry_counts, FTW_OPEN_FD, flags);
+			if (nftw64(dir_name, calc_entry_counts, FTW_OPEN_FD, flags) < 0) {
+				perror("Counting directory entries");
+				had_error = 1;
+				continue;
+			}
 
 			if (mode_flag & STATISTIC) {
 				if (mode_flag & DETAIL)
@@ -1937,8 +1860,10 @@ int main(int argc, char *argv[])
 					continue;
 				}
 
-				nftw64(dir_name, file_statistic,
-							FTW_OPEN_FD, flags);
+				if (nftw64(dir_name, file_statistic, FTW_OPEN_FD, flags) < 0) {
+					perror("Inspecting directory entries");
+					had_error = 1;
+				}
 
 				if (succeed_cnt != 0 &&
 					current_uid == ROOT_UID) {
@@ -1977,26 +1902,11 @@ int main(int argc, char *argv[])
 				break;
 			}
 			/* File tree walk */
-			nftw64(dir_name, file_defrag, FTW_OPEN_FD, flags);
-			printf("\n\tSuccess:\t\t\t[ %u/%u ]\n", succeed_cnt,
-				total_count);
-			printf("\tFailure:\t\t\t[ %u/%u ]\n",
-				total_count - succeed_cnt, total_count);
-			if (mode_flag & DETAIL) {
-				printf("\tTotal extents:\t\t\t%4d->%d\n",
-					extents_before_defrag,
-					extents_after_defrag);
-				printf("\tFragmented percentage:\t\t"
-					"%3llu%%->%llu%%\n",
-					!regular_count ? 0 :
-					((unsigned long long)
-					frag_files_before_defrag * 100) /
-					regular_count,
-					!regular_count ? 0 :
-					((unsigned long long)
-					frag_files_after_defrag * 100) /
-					regular_count);
+			if (nftw64(dir_name, file_defrag, FTW_OPEN_FD, flags) < 0) {
+				perror("Walking directory entries");
+				had_error = 1;
 			}
+			report_summary();
 			break;
 		case FILENAME:
 			total_count = 1;
@@ -2007,6 +1917,7 @@ int main(int argc, char *argv[])
 			if (strncmp(lost_found_dir, dir_name,
 				    strnlen(lost_found_dir,
 					    PATH_MAX)) == 0) {
+				had_error = 1;
 				PRINT_ERR_MSG(NGMSG_LOST_FOUND);
 				PRINT_FILE_NAME(argv[i]);
 				continue;
@@ -2020,10 +1931,7 @@ int main(int argc, char *argv[])
 								 argv[i]);
 			/* Defrag single file process */
 			file_defrag(argv[i], &buf, FTW_F, NULL);
-			if (succeed_cnt != 0)
-				printf(" Success:\t\t\t[1/1]\n");
-			else
-				printf(" Success:\t\t\t[0/1]\n");
+			report_summary();
 
 			break;
 		}
@@ -2089,7 +1997,7 @@ int main(int argc, char *argv[])
 
 	}
 
-	if (success_flag)
+	if (success_flag && !had_error)
 		return 0;
 
 	exit(1);

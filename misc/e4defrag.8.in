@@ -55,8 +55,41 @@ If this option is specified,
 is never defragmented.
 .TP
 .B \-v
-Print error messages and the fragmentation count before and after defrag for
-each file.
+Print the extent count before and after movement, the estimated target
+count, bytes moved, and elapsed time for each file.  The target count is
+a filesystem-geometry heuristic, not a guarantee of an attainable layout.
+If geometry is unavailable, the displayed target is labelled as a fallback.
+.SH RESULTS
+Each regular file receives a final result:
+.TP
+.B MOVED
+The move operation completed and the kernel reported moving blocks.
+This does not guarantee a reduced extent count or faster access.
+.TP
+.B UNCHANGED
+The move operation completed but reported moving no blocks.
+.TP
+.B SKIPPED
+No movement was attempted because of an eligibility or policy decision.
+The reason is printed, including empty files, locks, and rejected donors.
+.TP
+.B FAILED
+A required operation failed.  The stage and error are printed even without
+.BR \-v .
+Any known movement already completed is reported; failure does not undo it.
+.PP
+The summary counts these outcomes separately and excludes non-file directory
+entries from file results.  A failed optional after-map measurement is a
+warning and does not change the outcome of a completed move.
+.PP
+Final file results are complete lines on standard output.  Pathnames are
+quoted, with control and non-ASCII bytes escaped as hexadecimal byte values.
+Startup and traversal diagnostics may also appear on standard error.
+.SH EXIT STATUS
+Zero means processing completed without operational or traversal errors.
+Normal policy skips are not errors.  A nonzero status indicates an invalid
+invocation or a failed requested operation, even if other files succeeded.
+Optional measurement and cache-advice warnings alone do not cause failure.
 .SH NOTES
 Progress is updated in place when standard output is a terminal and
 .B TERM
@@ -64,6 +97,8 @@ is set to a nonempty value other than
 .BR dumb .
 When output is redirected to a file or pipe, results are printed without
 cursor-control sequences or intermediate progress updates.
+The movement percentage tracks logical file position, including holes;
+it is not a measure of improvement or the fraction of allocated bytes moved.
 Set
 .B TERM=dumb
 to force plain output when recording a terminal session.

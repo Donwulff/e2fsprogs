@@ -8,6 +8,10 @@
 #include <stdarg.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <fcntl.h>
+#include <sys/statfs.h>
+#include <sys/wait.h>
+#include <mntent.h>
 
 static int test_ioctl(int fd, unsigned long request, ...);
 static void *test_malloc(size_t size);
@@ -15,6 +19,11 @@ static void *test_mmap64(void *addr, size_t length, int prot, int flags,
 			 int fd, off64_t offset);
 static int test_mincore(void *addr, size_t length, unsigned char *vec);
 static int test_munmap(void *addr, size_t length);
+static int test_fallocate(int fd, int mode, off_t offset, off_t len);
+static int test_fcntl(int fd, int cmd, ...);
+static int test_fstatfs64(int fd, struct statfs64 *buf);
+static int test_statfs64(const char *path, struct statfs64 *buf);
+static struct mntent *test_getmntent(FILE *stream);
 
 #define main e4defrag_main
 #define ioctl test_ioctl
@@ -22,7 +31,17 @@ static int test_munmap(void *addr, size_t length);
 #define mmap64 test_mmap64
 #define mincore test_mincore
 #define munmap test_munmap
+#define fallocate test_fallocate
+#define fcntl test_fcntl
+#define fstatfs64 test_fstatfs64
+#define statfs64(path, buf) test_statfs64(path, buf)
+#define getmntent test_getmntent
 #include "e4defrag.c"
+#undef getmntent
+#undef statfs64
+#undef fstatfs64
+#undef fcntl
+#undef fallocate
 #undef munmap
 #undef mincore
 #undef mmap64
@@ -37,6 +56,68 @@ static __u64 skipped_blocks;
 static size_t mapping_limit = DEFRAG_MAX_BYTES;
 static unsigned int mappings, mapping_failures;
 static int mapping_error, mincore_error, move_error;
+static struct defrag_result move_result;
+static int fixture, fixture_maps, donor_runs = 1, source_runs = 3;
+static int allocation_error, lock_file, no_space, after_error;
+static __u64 partial_blocks;
+static int fixture_mount;
+
+static int test_statfs64(const char *path, struct statfs64 *buf)
+{
+	int ret = statfs64(path, buf);
+
+	if (!ret && fixture_mount)
+		buf->f_type = EXT4_SUPER_MAGIC;
+	return ret;
+}
+
+static struct mntent *test_getmntent(FILE *stream)
+{
+	static int next;
+	static struct mntent entry = {
+		.mnt_fsname = "/dev/e4defrag-test-no-device",
+		.mnt_dir = "/", .mnt_type = "ext4", .mnt_opts = "rw"
+	};
+
+	if (!fixture_mount)
+		return getmntent(stream);
+	next = !next;
+	return next ? &entry : NULL;
+}
+
+static int test_fallocate(int fd, int mode, off_t offset, off_t len)
+{
+	if (allocation_error) {
+		errno = allocation_error;
+		return -1;
+	}
+	return fallocate(fd, mode, offset, len);
+}
+
+static int test_fcntl(int fd, int cmd, ...)
+{
+	va_list ap;
+	struct flock *lock;
+
+	assert(cmd == F_GETLK);
+	va_start(ap, cmd);
+	lock = va_arg(ap, struct flock *);
+	va_end(ap);
+	if (lock_file) {
+		lock->l_type = F_WRLCK;
+		return 0;
+	}
+	return fcntl(fd, cmd, lock);
+}
+
+static int test_fstatfs64(int fd, struct statfs64 *buf)
+{
+	int ret = fstatfs64(fd, buf);
+
+	if (ret == 0 && no_space)
+		buf->f_bfree = buf->f_bavail = 0;
+	return ret;
+}
 
 static void *test_mmap64(void *addr, size_t length, int prot, int flags,
 			 int fd, off64_t offset)
@@ -100,6 +181,7 @@ static int test_ioctl(int fd EXT2FS_ATTR((unused)), unsigned long request, ...)
 		assert(move->orig_start == move->donor_start);
 		moves[move_count++] = *move;
 		if (move_error) {
+			move->moved_len = partial_blocks;
 			errno = move_error;
 			return -1;
 		}
@@ -109,6 +191,26 @@ static int test_ioctl(int fd EXT2FS_ATTR((unused)), unsigned long request, ...)
 	assert(request == FS_IOC_FIEMAP);
 	fm = va_arg(ap, struct fiemap *);
 	va_end(ap);
+	if (!fm->fm_extent_count) {
+		if (after_error) {
+			errno = after_error;
+			return -1;
+		}
+		fm->fm_mapped_extents = donor_runs;
+		return 0;
+	}
+	if (fixture) {
+		unsigned int count = fixture_maps++ ? donor_runs : source_runs;
+
+		fm->fm_mapped_extents = count;
+		for (i = 0; i < count; i++) {
+			fm->fm_extents[i].fe_logical = (__u64)i * 30 / count * block_size;
+			fm->fm_extents[i].fe_physical = (__u64)(100 + i * 40) * block_size;
+			fm->fm_extents[i].fe_length = (__u64)30 / count * block_size;
+		}
+		fm->fm_extents[count - 1].fe_flags = FIEMAP_EXTENT_LAST;
+		return 0;
+	}
 	fm->fm_mapped_extents = 3;
 	for (i = 0; i < 3; i++) {
 		fm->fm_extents[i].fe_logical = (__u64)i * 10 * block_size;
@@ -175,7 +277,7 @@ static void check_sparse_groups(void)
 	assert(dup2(fileno(progress), STDOUT_FILENO) >= 0);
 	/* Capture interactive updates to check logical progress across holes. */
 	interactive_output = 1;
-	assert(call_defrag(fd, fd, "sparse", &st, groups) == 0);
+	assert(call_defrag(fd, fd, "sparse", &st, groups, &move_result) == 0);
 	interactive_output = 0;
 	fflush(stdout);
 	assert(dup2(saved_stdout, STDOUT_FILENO) >= 0);
@@ -220,7 +322,7 @@ static void check_large_group(int retry)
 	move_count = mapping_failures = 0;
 	mapping_limit = retry ? (8U << 20) : DEFRAG_MAX_BYTES;
 	skipped_blocks = 3; /* Success can move fewer blocks than requested. */
-	assert(call_defrag(fileno(file), fileno(file), "large", &st, groups) == 0);
+	assert(call_defrag(fileno(file), fileno(file), "large", &st, groups, &move_result) == 0);
 	assert(move_count == (retry ? 32 : 4));
 	assert(mapping_failures == (retry ? 3 : 0));
 	next = nodes[0].data.logical;
@@ -260,20 +362,141 @@ static void check_mapping_errors(void)
 	group.len = 1;
 	move_count = mapping_failures = 0;
 	mapping_error = ENOMEM;
-	assert(call_defrag(fileno(file), fileno(file), "oom", &st, &group) == -1);
+	assert(call_defrag(fileno(file), fileno(file), "oom", &st, &group, &move_result) == -1);
 	assert(move_count == 0 && mapping_failures == 1);
 	mapping_error = 0;
 	move_error = EIO;
-	assert(call_defrag(fileno(file), fileno(file), "io", &st, &group) == -1);
+	assert(call_defrag(fileno(file), fileno(file), "io", &st, &group, &move_result) == -1);
 	assert(errno == EIO && move_count == 1 && mappings == 0);
 	move_error = 0;
 	/* A range containing only holes must still advance to completion. */
 	skipped_blocks = 1;
 	move_count = 0;
-	assert(call_defrag(fileno(file), fileno(file), "hole", &st, &group) == 0);
+	assert(call_defrag(fileno(file), fileno(file), "hole", &st, &group, &move_result) == 0);
 	assert(move_count == 1);
 	skipped_blocks = 0;
 	fclose(file);
+}
+
+static void run_file_case(const char *path, const struct stat64 *st,
+			  int flag, enum defrag_outcome expected, const char *message)
+{
+	FILE *capture = tmpfile();
+	char output[8192];
+	size_t len;
+	int saved_stdout;
+
+	assert(capture);
+	fflush(stdout);
+	saved_stdout = dup(STDOUT_FILENO);
+	assert(saved_stdout >= 0);
+	assert(dup2(fileno(capture), STDOUT_FILENO) >= 0);
+	fixture_maps = move_count = 0;
+	had_error = 0;
+	memset(outcomes, 0, sizeof(outcomes));
+	assert(file_defrag(path, st, flag, NULL) == 0);
+	fflush(stdout);
+	assert(dup2(saved_stdout, STDOUT_FILENO) >= 0);
+	close(saved_stdout);
+	rewind(capture);
+	len = fread(output, 1, sizeof(output) - 1, capture);
+	output[len] = 0;
+	fclose(capture);
+	assert(outcomes[expected] == 1);
+	assert(had_error == (expected == RESULT_FAILED));
+	assert(!strchr(output, '\033') && !strchr(output, '\r'));
+	if (message)
+		assert(strstr(output, message));
+	if (expected == RESULT_MOVED || expected == RESULT_UNCHANGED)
+		assert(move_count > 0);
+	if (expected == RESULT_SKIPPED || expected == RESULT_EXCLUDED)
+		assert(move_count == 0);
+}
+
+static void run_main_case(int argc, char **argv, int expected)
+{
+	pid_t pid;
+	int status;
+
+	fflush(NULL);
+	pid = fork();
+	assert(pid >= 0);
+	if (pid == 0) {
+		fixture_mount = 1;
+		fixture_maps = 0;
+		mode_flag = 0;
+		optind = 0;
+		exit(e4defrag_main(argc, argv));
+	}
+	assert(waitpid(pid, &status, 0) == pid);
+	assert(WIFEXITED(status) && WEXITSTATUS(status) == expected);
+}
+
+static void check_file_results(void)
+{
+	char path[] = "/tmp/e4defrag-status-XXXXXX";
+	struct stat64 st, other;
+	int fd = mkstemp(path);
+
+	assert(fd >= 0);
+	assert(fallocate(fd, 0, 0, 30 * block_size) == 0);
+	assert(fstat64(fd, &st) == 0);
+	close(fd);
+	fixture = 1;
+	current_uid = getuid();
+	interactive_output = mode_flag = 0;
+	lost_found_dir[0] = 0;
+	run_file_case(path, &st, FTW_F, RESULT_MOVED, "MOVED; moved 122880 bytes");
+	mode_flag = DETAIL;
+	run_file_case(path, &st, FTW_F, RESULT_MOVED, "extents 3 -> 1");
+	after_error = EIO;
+	run_file_case(path, &st, FTW_F, RESULT_MOVED, "after-map unavailable");
+	after_error = 0;
+	mode_flag = 0;
+	donor_runs = 3;
+	run_file_case(path, &st, FTW_F, RESULT_SKIPPED, "donor not better");
+	donor_runs = 1;
+	source_runs = 1;
+	run_file_case(path, &st, FTW_F, RESULT_SKIPPED, "already meets estimated target");
+	source_runs = 3;
+	allocation_error = ENOSPC;
+	run_file_case(path, &st, FTW_F, RESULT_FAILED, "allocating donor");
+	allocation_error = 0;
+	no_space = 1;
+	run_file_case(path, &st, FTW_F, RESULT_FAILED, "checking free space");
+	no_space = 0;
+	lock_file = 1;
+	run_file_case(path, &st, FTW_F, RESULT_SKIPPED, "file locked");
+	lock_file = 0;
+	move_error = EIO;
+	partial_blocks = 7;
+	run_file_case(path, &st, FTW_F, RESULT_FAILED, "moved 28672 bytes");
+	move_error = EFAULT;
+	run_file_case(path, &st, FTW_F, RESULT_FAILED, "total unknown");
+	move_error = 0;
+	partial_blocks = 0;
+	skipped_blocks = 30;
+	run_file_case(path, &st, FTW_F, RESULT_UNCHANGED, "UNCHANGED");
+	skipped_blocks = 0;
+	other = st;
+	other.st_size = 0;
+	run_file_case(path, &other, FTW_F, RESULT_SKIPPED, "empty file");
+	other.st_mode = S_IFDIR | 0700;
+	run_file_case(path, &other, FTW_D, RESULT_EXCLUDED, NULL);
+	run_file_case("bad\n\033name", NULL, FTW_NS, RESULT_FAILED,
+		      "\"bad\\x0a\\x1bname\": FAILED");
+	{
+		char *good[] = { "e4defrag", path, NULL };
+		char *mixed[] = { "e4defrag", path, "/no/such/e4defrag-target", NULL };
+		char *reverse[] = { "e4defrag", "/no/such/e4defrag-target", path, NULL };
+
+		run_main_case(2, good, 0);
+		run_main_case(3, mixed, 1);
+		run_main_case(3, reverse, 1);
+	}
+	assert(unlink(path) == 0);
+	run_file_case(path, &st, FTW_F, RESULT_FAILED, "opening source");
+	fixture = 0;
 }
 
 int main(void)
@@ -292,6 +515,7 @@ int main(void)
 	check_large_group(0);
 	check_large_group(1);
 	check_mapping_errors();
+	check_file_results();
 	fflush(stdout);
 	assert(dup2(saved_stdout, STDOUT_FILENO) >= 0);
 	close(saved_stdout);
