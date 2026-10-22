@@ -34,7 +34,12 @@ ENDL
 
 echo "tune2fs test" > $OUT
 
-MKE2FS_CONFIG=$CONF $MKE2FS -F -T ext4h -o Linux -I 128 $TMPFILE 786432 >> $OUT 2>&1
+# Fix the directory layout so some leaf blocks have no room for checksum
+# tails.  A random hash seed can leave enough space in every block, causing
+# tune2fs to omit the expected request to run e2fsck -fD.
+MKE2FS_CONFIG=$CONF $MKE2FS -F -T ext4h -o Linux -I 128 \
+	-E hash_seed=00000000-0000-0000-0000-000000000001 \
+	$TMPFILE 786432 >> $OUT 2>&1
 rm -f $CONF
 
 # dump and check
