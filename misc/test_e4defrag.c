@@ -173,7 +173,10 @@ static void check_sparse_groups(void)
 	saved_stdout = dup(STDOUT_FILENO);
 	assert(saved_stdout >= 0);
 	assert(dup2(fileno(progress), STDOUT_FILENO) >= 0);
+	/* Capture interactive updates to check logical progress across holes. */
+	interactive_output = 1;
 	assert(call_defrag(fd, fd, "sparse", &st, groups) == 0);
+	interactive_output = 0;
 	fflush(stdout);
 	assert(dup2(saved_stdout, STDOUT_FILENO) >= 0);
 	close(saved_stdout);

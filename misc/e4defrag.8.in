@@ -58,6 +58,16 @@ is never defragmented.
 Print error messages and the fragmentation count before and after defrag for
 each file.
 .SH NOTES
+Progress is updated in place when standard output is a terminal and
+.B TERM
+is set to a nonempty value other than
+.BR dumb .
+When output is redirected to a file or pipe, results are printed without
+cursor-control sequences or intermediate progress updates.
+Set
+.B TERM=dumb
+to force plain output when recording a terminal session.
+.PP
 .B e4defrag
 does not support swap file, files in lost+found directory, and files allocated
 in indirect blocks. When

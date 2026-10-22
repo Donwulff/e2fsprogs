@@ -61,8 +61,6 @@
 #endif
 
 /* Macro functions */
-/* Redraw the current line without assuming a terminal height. */
-#define RESET_PROGRESS_LINE "\r\033[K"
 #define PRINT_ERR_MSG(msg)	fprintf(stderr, "%s\n", (msg))
 #define IN_FTW_PRINT_ERR_MSG(msg)	\
 	fprintf(stderr, "\t%s\t\t[ NG ]\n", (msg))
@@ -174,6 +172,7 @@ static int	block_size;
 static int	extents_before_defrag;
 static int	extents_after_defrag;
 static int	mode_flag;
+static int	interactive_output;
 static unsigned int	current_uid;
 static unsigned int	defraged_file_count;
 static unsigned int	frag_files_before_defrag;
@@ -186,6 +185,21 @@ static __u32 blocks_per_group;
 static __u32 feature_incompat;
 static ext4_fsblk_t	files_block_count;
 static struct frag_statistic_ino	frag_rank[SHOW_FRAG_FILES];
+
+static void init_output(void)
+{
+	const char *term = getenv("TERM");
+
+	interactive_output = isatty(STDOUT_FILENO) && term && *term &&
+		strcmp(term, "dumb") != 0;
+}
+
+static void reset_progress_line(void)
+{
+	/* Redraw the current line only when stdout supports terminal output. */
+	if (interactive_output)
+		fputs("\r\033[K", stdout);
+}
 
 
 /*
@@ -540,7 +554,8 @@ static int file_check(int fd, const struct stat64 *buf, const char *file,
 	ret = check_free_size(fd, file, blk_count);
 	if (ret < 0) {
 		if ((mode_flag & DETAIL) && ret == -ENOSPC) {
-			printf(RESET_PROGRESS_LINE "[%u/%u] \"%s\"\t\t"
+			reset_progress_line();
+			printf("[%u/%u] \"%s\"\t\t"
 				"  extents: %d -> %d\n", defraged_file_count,
 				total_count, file, extents, extents);
 			IN_FTW_PRINT_ERR_MSG(
@@ -553,7 +568,8 @@ static int file_check(int fd, const struct stat64 *buf, const char *file,
 	if (current_uid != ROOT_UID &&
 		buf->st_uid != current_uid) {
 		if (mode_flag & DETAIL) {
-			printf(RESET_PROGRESS_LINE "[%u/%u] \"%s\"\t\t"
+			reset_progress_line();
+			printf("[%u/%u] \"%s\"\t\t"
 				"  extents: %d -> %d\n", defraged_file_count,
 				total_count, file, extents, extents);
 			IN_FTW_PRINT_ERR_MSG(
@@ -1005,7 +1021,7 @@ static int file_statistic(const char *file, const struct stat64 *buf,
 	if (mode_flag & DETAIL) {
 		if (total_count == 1 && regular_count == 1)
 			printf("<File>\n");
-		else {
+		else if (interactive_output) {
 			printf("[%u/%u]", defraged_file_count, total_count);
 			fflush(stdout);
 		}
@@ -1163,28 +1179,29 @@ static int file_statistic(const char *file, const struct stat64 *buf,
 
 	if (mode_flag & DETAIL) {
 		/* Print statistic info */
+		reset_progress_line();
 		snprintf(msg_buffer, sizeof(msg_buffer), "[%u/%u]%.*s",
 			 defraged_file_count, total_count, PATH_MAX, file);
 		if (current_uid == ROOT_UID) {
 			if (strlen(msg_buffer) > 40)
-				printf(RESET_PROGRESS_LINE "%s\n"
+				printf("%s\n"
 				       "%50d/%-10d%6llu KB\n",
 				       msg_buffer, now_ext_count,
 				       best_ext_count,
 				       (unsigned long long) size_per_ext);
 			else
-				printf(RESET_PROGRESS_LINE "%-40s"
+				printf("%-40s"
 				       "%10d/%-10d%6llu KB\n",
 				       msg_buffer, now_ext_count,
 				       best_ext_count,
 				       (unsigned long long) size_per_ext);
 		} else {
 			if (strlen(msg_buffer) > 40)
-				printf(RESET_PROGRESS_LINE "%s\n%50d/%-10s%7s\n",
+				printf("%s\n%50d/%-10s%7s\n",
 						msg_buffer, now_ext_count,
 							"-", "-");
 			else
-				printf(RESET_PROGRESS_LINE "%-40s%10d/%-10s%7s\n",
+				printf("%-40s%10d/%-10s%7s\n",
 						msg_buffer, now_ext_count,
 							"-", "-");
 		}
@@ -1240,7 +1257,11 @@ static void print_progress(const char *file, ext2_loff_t start,
 			   ext2_loff_t file_size)
 {
 	int percent = file_size > 0 ? (int)(100.0 * start / file_size) : 100;
-	printf(RESET_PROGRESS_LINE "[%u/%u]%s:\t%3d%%",
+
+	if (!interactive_output)
+		return;
+	reset_progress_line();
+	printf("[%u/%u]%s:\t%3d%%",
 		defraged_file_count, total_count, file, min(percent, 100));
 	fflush(stdout);
 
@@ -1274,6 +1295,12 @@ static int call_defrag(int fd, int donor_fd, const char *file,
 
 	memset(&move_data, 0, sizeof(struct move_extent));
 	move_data.donor_fd = donor_fd;
+
+	/* Plain output keeps one status line, including on an early failure. */
+	if (!interactive_output) {
+		printf("[%u/%u]%s:", defraged_file_count, total_count, file);
+		fflush(stdout);
+	}
 
 	/* Print defrag progress */
 	print_progress(file, start, buf->st_size);
@@ -1408,7 +1435,7 @@ static int file_defrag(const char *file, const struct stat64 *buf,
 	if (defraged_file_count > total_count)
 		total_count = defraged_file_count;
 
-	if (mode_flag & DETAIL) {
+	if ((mode_flag & DETAIL) && interactive_output) {
 		printf("[%u/%u]", defraged_file_count, total_count);
 		fflush(stdout);
 	}
@@ -1636,7 +1663,8 @@ check_improvement:
 	if (file_frags_start <= best ||
 			orig_physical_cnt <= donor_physical_cnt) {
 #endif
-		printf(RESET_PROGRESS_LINE "[%u/%u]%s:\t%3d%%",
+		reset_progress_line();
+		printf("[%u/%u]%s:\t%3d%%",
 			defraged_file_count, total_count, file, 100);
 		if (mode_flag & DETAIL)
 			printf("  extents: %d -> %d (%d)",
@@ -1654,6 +1682,8 @@ check_improvement:
 
 	/* Defrag the file */
 	ret = call_defrag(fd, donor_fd, file, buf, donor_group_head);
+	if (!interactive_output && ret == 0)
+		printf("\t100%%");
 
 	/* Count file fragments after defrag and print extents info */
 	if (mode_flag & DETAIL) {
@@ -1716,6 +1746,7 @@ int main(int argc, char *argv[])
 	struct stat64	buf;
 	ext2_filsys fs = NULL;
 
+	init_output();
 	printf("e4defrag %s (%s)\n", E2FSPROGS_VERSION, E2FSPROGS_DATE);
 
 	/* Parse arguments */
