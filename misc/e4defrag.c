@@ -1,6 +1,6 @@
 // Gives some extra output for testing
 //#define DEBUG
-// Shake files around even if already optimal (good for alignment)
+// Legacy build default: allow equal layouts (prefer --allow-equal-layout)
 //#define SHAKE
 // Ignore file-locks eg. db; doesn't seem to cause problems, but ymmw
 //#define NOLOCK
@@ -38,6 +38,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <ftw.h>
+#include <getopt.h>
 #include <limits.h>
 #include <mntent.h>
 #include <stdio.h>
@@ -131,8 +132,8 @@
 
 /* The following macros are error message */
 #define MSG_USAGE		\
-"Usage	: e4defrag [-v[v]] file...| directory...| device...\n\
-	: e4defrag  -c  file...| directory...| device...\n"
+"Usage	: e4defrag [-v[v]] [--allow-equal-layout | --shake] target...\n\
+	: e4defrag [-v[v]] -c target... (file, directory, or device)\n"
 
 #define NGMSG_EXT4		"Filesystem is not ext4 filesystem"
 #define NGMSG_FILE_EXTENT	"Failed to get file extents"
@@ -187,6 +188,13 @@ static __u32 blocks_per_group;
 static __u32 feature_incompat;
 static ext4_fsblk_t	files_block_count;
 static struct frag_statistic_ino	frag_rank[SHOW_FRAG_FILES];
+
+enum movement_policy { MOVE_IMPROVE, MOVE_EQUAL, MOVE_ANY };
+#ifdef SHAKE
+static enum movement_policy movement_policy = MOVE_EQUAL;
+#else
+static enum movement_policy movement_policy = MOVE_IMPROVE;
+#endif
 
 enum defrag_outcome {
 	RESULT_MOVED, RESULT_UNCHANGED, RESULT_SKIPPED, RESULT_FAILED,
@@ -299,6 +307,9 @@ static void report_diagnostics(const struct defrag_result *result)
 
 	if (!result->source_seen)
 		return;
+	printf("\tMovement policy: %s.\n", movement_policy == MOVE_ANY ?
+	       "accept any donor layout (shake)" : movement_policy == MOVE_EQUAL ?
+	       "accept better or equal donor layouts" : "require a better donor layout");
 	printf("\t%-12s%10s%12s%15s\n", "Layout", "Extents", "Data runs", "Spacing runs");
 	print_layout("Before", &result->source);
 	if (result->donor_seen)
@@ -1698,7 +1709,12 @@ static int file_defrag(const char *file, const struct stat64 *buf,
 		result.reason = "empty file";
 		goto out;
 	}
-	if (buf->st_blocks <= buf->st_blksize / 512) {
+	if (buf->st_blocks == 0) {
+		result.reason = "no allocated blocks";
+		goto out;
+	}
+	if (movement_policy == MOVE_IMPROVE &&
+	    buf->st_blocks <= buf->st_blksize / 512) {
 		result.reason = "at most one allocated block";
 		goto out;
 	}
@@ -1730,13 +1746,11 @@ static int file_defrag(const char *file, const struct stat64 *buf,
 		goto out;
 	}
 	result.best = get_best_count(blk_count);
-#ifndef SHAKE
-	if (result.before <= result.best) {
+	if (movement_policy == MOVE_IMPROVE && result.before <= result.best) {
 		result.reason = "already meets estimated target";
 		result.after = result.before;
 		goto out;
 	}
-#endif
 	if (join_extents(orig_logical, &orig_groups) < 0) {
 		result_error(&result, "grouping source extents", errno);
 		goto out;
@@ -1791,12 +1805,10 @@ static int file_defrag(const char *file, const struct stat64 *buf,
 		result_error(&result, "grouping donor extents", errno);
 		goto out;
 	}
-#ifdef SHAKE
-	if (result.before < result.best || orig_physical_cnt < donor_physical_cnt) {
-#else
-	if (orig_physical_cnt <= donor_physical_cnt) {
-#endif
-		result.reason = "donor not better by current heuristic";
+	if ((movement_policy == MOVE_IMPROVE && orig_physical_cnt <= donor_physical_cnt) ||
+	    (movement_policy == MOVE_EQUAL && orig_physical_cnt < donor_physical_cnt)) {
+		result.reason = movement_policy == MOVE_EQUAL ?
+			"donor worse by current heuristic" : "donor not better by current heuristic";
 		result.after = result.before;
 		goto out;
 	}
@@ -1862,6 +1874,13 @@ out:
  */
 int main(int argc, char *argv[])
 {
+	enum { OPT_ALLOW_EQUAL = 256, OPT_SHAKE };
+	static const struct option long_options[] = {
+		{ "allow-equal-layout", no_argument, NULL, OPT_ALLOW_EQUAL },
+		{ "shake", no_argument, NULL, OPT_SHAKE },
+		{ NULL, 0, NULL, 0 }
+	};
+	int movement_option = 0;
 	int	opt;
 	int	i, j, ret = 0;
 	int	flags = FTW_PHYS | FTW_MOUNT;
@@ -1881,7 +1900,7 @@ int main(int argc, char *argv[])
 	if (argc == 1)
 		goto out;
 
-	while ((opt = getopt(argc, argv, "vc")) != EOF) {
+	while ((opt = getopt_long(argc, argv, "vc", long_options, NULL)) != EOF) {
 		switch (opt) {
 		case 'v':
 			if (mode_flag & DETAIL)
@@ -1891,6 +1910,15 @@ int main(int argc, char *argv[])
 		case 'c':
 			mode_flag |= STATISTIC;
 			break;
+		case OPT_ALLOW_EQUAL:
+		case OPT_SHAKE:
+			if (movement_option && movement_option != opt) {
+				PRINT_ERR_MSG("Choose either --allow-equal-layout or --shake");
+				goto out;
+			}
+			movement_option = opt;
+			movement_policy = opt == OPT_SHAKE ? MOVE_ANY : MOVE_EQUAL;
+			break;
 		default:
 			goto out;
 		}
@@ -1898,6 +1926,10 @@ int main(int argc, char *argv[])
 
 	if (argc == optind)
 		goto out;
+	if (movement_option && (mode_flag & STATISTIC)) {
+		PRINT_ERR_MSG("Movement options cannot be combined with -c");
+		goto out;
+	}
 
 	current_uid = getuid();
 

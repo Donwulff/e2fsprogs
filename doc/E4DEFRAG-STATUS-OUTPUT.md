@@ -81,6 +81,27 @@ placement diagnostics. A failed optional measurement prints a warning and
 an unknown count instead of changing a completed move into a failure.
 `-c -vv` adds layout measurements while remaining read-only.
 
+## Relocation without an extent-count improvement
+
+Movement policy is independent of verbosity:
+
+| Option | Donor accepted by the current run-count heuristic |
+| --- | --- |
+| Default | Fewer contiguous data runs; skip files already at the estimated best count |
+| `--allow-equal-layout` | Fewer or equal runs, including files already at the estimate |
+| `--shake` | Any count, including a worse layout |
+
+Both relocation options consider single-block files too, and retain the
+eligibility checks. They are mutually exclusive and cannot accompany `-c`.
+The existing grouped allocation and hole-preservation policy is unchanged.
+See [movement controls](E4DEFRAG-DONOR-ALLOCATION.md#runtime-controls).
+
+`-vv` names the selected policy. A file successfully relocated from 12
+extents to 12, or from 12 to 20 under `--shake`, still reports `[ MOVED ]`.
+`[ UNCHANGED ]` means the kernel reported zero blocks moved, not an unchanged
+extent count. Ordinary `-v` retains `[ OK ]` and displays the observed
+before/after counts. A kernel rejection remains an error with every policy.
+
 ## What the measurements mean
 
 - **Extents** count FIEMAP mapping records. Adjacent records need not imply

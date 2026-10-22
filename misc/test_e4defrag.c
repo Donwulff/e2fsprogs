@@ -58,6 +58,7 @@ static unsigned int mappings, mapping_failures;
 static int mapping_error, mincore_error, move_error;
 static struct defrag_result move_result;
 static int fixture, fixture_maps, donor_runs = 1, source_runs = 3;
+static unsigned int fixture_blocks = 30;
 static int allocation_error, lock_file, no_space, after_error;
 static __u64 partial_blocks;
 static int fixture_mount;
@@ -208,9 +209,9 @@ static int test_ioctl(int fd EXT2FS_ATTR((unused)), unsigned long request, ...)
 
 		fm->fm_mapped_extents = count;
 		for (i = 0; i < count; i++) {
-			fm->fm_extents[i].fe_logical = (__u64)i * 30 / count * block_size;
+			fm->fm_extents[i].fe_logical = (__u64)i * fixture_blocks / count * block_size;
 			fm->fm_extents[i].fe_physical = (__u64)(100 + i * 40) * block_size;
-			fm->fm_extents[i].fe_length = (__u64)30 / count * block_size;
+			fm->fm_extents[i].fe_length = (__u64)fixture_blocks / count * block_size;
 		}
 		fm->fm_extents[count - 1].fe_flags = FIEMAP_EXTENT_LAST;
 		return 0;
@@ -419,7 +420,7 @@ static void run_file_case(const char *path, const struct stat64 *st,
 		assert(move_count == 0);
 }
 
-static void run_main_case(int argc, char **argv, int expected)
+static void run_main_case(int argc, char **argv, int expected, int expect_move)
 {
 	pid_t pid;
 	int status;
@@ -430,9 +431,13 @@ static void run_main_case(int argc, char **argv, int expected)
 	if (pid == 0) {
 		fixture_mount = 1;
 		fixture_maps = 0;
+		move_count = 0;
 		mode_flag = 0;
+		movement_policy = MOVE_IMPROVE;
 		optind = 0;
-		exit(e4defrag_main(argc, argv));
+		status = e4defrag_main(argc, argv);
+		assert((move_count != 0) == expect_move);
+		exit(status);
 	}
 	assert(waitpid(pid, &status, 0) == pid);
 	assert(WIFEXITED(status) && WEXITSTATUS(status) == expected);
@@ -550,15 +555,115 @@ static void check_file_results(void)
 		char *mixed[] = { "e4defrag", path, "/no/such/e4defrag-target", NULL };
 		char *reverse[] = { "e4defrag", "/no/such/e4defrag-target", path, NULL };
 
-		run_main_case(2, good, 0);
-		run_main_case(3, verbose, 0);
-		run_main_case(3, check, 0);
-		run_main_case(3, mixed, 1);
-		run_main_case(3, reverse, 1);
+		run_main_case(2, good, 0, 1);
+		run_main_case(3, verbose, 0, 1);
+		run_main_case(3, check, 0, 0);
+		run_main_case(3, mixed, 1, 1);
+		run_main_case(3, reverse, 1, 1);
 	}
 	assert(unlink(path) == 0);
 	run_file_case(path, &st, FTW_F, RESULT_FAILED, "opening source");
 	fixture = 0;
+}
+
+static void check_movement_policies(void)
+{
+	char path[] = "/tmp/e4defrag-policy-XXXXXX";
+	struct stat64 st, other;
+	int fd = mkstemp(path), policy, donor;
+
+	assert(fd >= 0);
+	assert(fallocate(fd, 0, 0, fixture_blocks * block_size) == 0);
+	assert(fstat64(fd, &st) == 0);
+	fixture = 1;
+	mode_flag = DETAIL | DIAGNOSTIC;
+	current_uid = getuid();
+	source_runs = 3;
+	for (policy = MOVE_IMPROVE; policy <= MOVE_ANY; policy++) {
+		movement_policy = policy;
+		/* A better, equal, and worse donor under each policy. */
+		for (donor = 1; donor <= 5; donor += 2) {
+			int accepted = policy == MOVE_ANY || donor < source_runs ||
+				(policy == MOVE_EQUAL && donor == source_runs);
+
+			donor_runs = donor;
+			run_file_case(path, &st, FTW_F,
+				      accepted ? RESULT_MOVED : RESULT_SKIPPED,
+				      accepted ? "[ MOVED ]" : "[ SKIPPED ]");
+		}
+	}
+	source_runs = donor_runs = 1;
+	for (policy = MOVE_IMPROVE; policy <= MOVE_ANY; policy++) {
+		movement_policy = policy;
+		run_file_case(path, &st, FTW_F,
+			      policy == MOVE_IMPROVE ? RESULT_SKIPPED : RESULT_MOVED,
+			      NULL);
+	}
+	/* Relocation also applies to a single allocated block. */
+	assert(ftruncate64(fd, block_size) == 0);
+	assert(fstat64(fd, &st) == 0);
+	fixture_blocks = 1;
+	movement_policy = MOVE_IMPROVE;
+	run_file_case(path, &st, FTW_F, RESULT_SKIPPED, "at most one allocated block");
+	for (policy = MOVE_EQUAL; policy <= MOVE_ANY; policy++) {
+		movement_policy = policy;
+		run_file_case(path, &st, FTW_F, RESULT_MOVED, "extents: 1 -> 1");
+		lock_file = 1;
+		run_file_case(path, &st, FTW_F, RESULT_SKIPPED, "file locked");
+		lock_file = 0;
+		current_uid = st.st_uid + 1;
+		run_file_case(path, &st, FTW_F, RESULT_SKIPPED, "another user");
+		current_uid = getuid();
+		no_space = 1;
+		run_file_case(path, &st, FTW_F, RESULT_FAILED, "checking free space");
+		assert(move_count == 0);
+		no_space = 0;
+		allocation_error = ENOSPC;
+		run_file_case(path, &st, FTW_F, RESULT_FAILED, "allocating donor");
+		assert(move_count == 0);
+		allocation_error = 0;
+		move_error = EOPNOTSUPP;
+		run_file_case(path, &st, FTW_F, RESULT_FAILED, "moving extents");
+		assert(move_count == 1);
+		move_error = 0;
+		strcpy(lost_found_dir, path);
+		run_file_case(path, &st, FTW_F, RESULT_SKIPPED, "lost+found is excluded");
+		lost_found_dir[0] = 0;
+	}
+	{
+		char *equal[] = { "e4defrag", "--allow-equal-layout", "-v", path, NULL };
+		char *shake[] = { "e4defrag", "--shake", "-vv", path, NULL };
+		char *repeat[] = { "e4defrag", "--shake", "--shake", path, NULL };
+		char *conflict[] = { "e4defrag", "--shake", "--allow-equal-layout", path, NULL };
+		char *reverse[] = { "e4defrag", "--allow-equal-layout", "--shake", path, NULL };
+		char *check_equal[] = { "e4defrag", "-c", "--allow-equal-layout", path, NULL };
+		char *check_shake[] = { "e4defrag", "--shake", "-c", path, NULL };
+
+		run_main_case(4, equal, 0, 1);
+		run_main_case(4, shake, 0, 1);
+		run_main_case(4, repeat, 0, 1);
+		run_main_case(4, conflict, 1, 0);
+		run_main_case(4, reverse, 1, 0);
+		run_main_case(4, check_equal, 1, 0);
+		run_main_case(4, check_shake, 1, 0);
+	}
+	assert(ftruncate64(fd, 0) == 0);
+	assert(fstat64(fd, &st) == 0);
+	assert(ftruncate64(fd, block_size) == 0);
+	assert(fstat64(fd, &other) == 0);
+	assert(other.st_blocks == 0);
+	for (policy = MOVE_EQUAL; policy <= MOVE_ANY; policy++) {
+		movement_policy = policy;
+		run_file_case(path, &st, FTW_F, RESULT_SKIPPED, "empty file");
+		run_file_case(path, &other, FTW_F, RESULT_SKIPPED, "no allocated blocks");
+	}
+	close(fd);
+	assert(unlink(path) == 0);
+	fixture = 0;
+	fixture_blocks = 30;
+	source_runs = 3;
+	donor_runs = 1;
+	movement_policy = MOVE_IMPROVE;
 }
 
 int main(void)
@@ -572,12 +677,14 @@ int main(void)
 	assert(saved_stdout >= 0);
 	assert(dup2(fileno(progress), STDOUT_FILENO) >= 0);
 	block_size = 4096;
+	movement_policy = MOVE_IMPROVE;
 	check_extent_allocation_failure();
 	check_sparse_groups();
 	check_large_group(0);
 	check_large_group(1);
 	check_mapping_errors();
 	check_file_results();
+	check_movement_policies();
 	check_layout_measurements();
 	fflush(stdout);
 	assert(dup2(saved_stdout, STDOUT_FILENO) >= 0);

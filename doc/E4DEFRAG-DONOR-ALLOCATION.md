@@ -288,13 +288,39 @@ The current `block_size` initialization uses the target's `st_blksize`, so
 geometry work should also validate actual filesystem block size rather than
 treating preferred I/O size as RAID geometry.
 
-## Runtime controls worth adding
+## Runtime controls
 
-The executable currently accepts only `-c` (statistics) and `-v` (verbosity).
-`ALIGN`, `SHAKE`, `NOLOCK`, `DEBUG`, and `DEBUG2` are compile-time switches.
-`SHAKE` relaxes equality checks; it does not unconditionally accept a worse
-donor. `NOLOCK` bypasses the advisory-lock query. There is no automatic SSD
-exclusion in this program; target selection is the caller's responsibility.
+The executable accepts `-c` (statistics), `-v` (familiar extent-count output),
+and `-vv` (extended status and placement diagnostics). Movement policy is
+selected separately:
+
+| Option | Acceptance policy |
+| --- | --- |
+| Default | Skip files already at the estimated best count; require fewer donor data runs |
+| `--allow-equal-layout` | Attempt relocation even at the estimate; accept fewer or equal donor data runs |
+| `--shake` | Attempt relocation of every eligible allocated file, including a donor with more data runs |
+
+The relocation options also consider single-block files. Empty files and
+files with no allocated blocks remain skipped. Ownership, advisory locks,
+free-space checks, and kernel move restrictions still apply. The options
+are mutually exclusive and rejected with `-c`. They change acceptance only:
+grouped allocation, small-hole spacing, optional padding, and bounded move
+windows are unchanged. No donor-allocation retry is added.
+
+Equal-layout movement can rearrange physical placement without reducing the
+target's extent count. Shake can worsen the target's layout. Either may
+change the free-space arrangement available for later files, but neither
+guarantees that later allocations improve. The donor count remains a heuristic:
+it includes allocation over holes that the source retains. `-vv` reports
+the policy and the observed before/after source maps.
+
+`ALIGN`, `SHAKE`, `NOLOCK`, `DEBUG`, and `DEBUG2` remain compile-time switches.
+Legacy `-DSHAKE` selects the equal-layout policy as the build default;
+runtime `--shake` explicitly selects the more permissive policy.
+`NOLOCK` bypasses the advisory-lock query. There is no automatic SSD
+exclusion; target selection is the caller's responsibility.
+
+### Additional controls worth adding
 
 The following is a proposed interface, not accepted syntax today:
 
@@ -303,7 +329,6 @@ The following is a proposed interface, not accepted syntax today:
 | `--max-hole-blocks=N` | `7` | Inclusive largest gap to bridge; `0` groups only logically adjacent extents |
 | `--move-window=SIZE` | `64MiB` | Bound processing memory independently of donor allocation; initially allow smaller block-aligned limits |
 | `--allocation-padding=off\|SIZE` | `off` | Explicit length padding; requires defined gap/EOF limits before implementation |
-| `--allow-equal-layout` | Disabled | Runtime equivalent of the existing `SHAKE` comparison policy |
 | `--show-geometry` | Disabled | Report detected values, effective policy and unresolved geometry |
 
 The first two controls are a small, separable implementation. Preserve the

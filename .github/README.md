@@ -26,6 +26,9 @@ See [Status and verbosity assessment](../doc/E4DEFRAG-STATUS-OUTPUT.md)
 for the status and diagnostic design and its implementation updates.
 Normal output and `-v` retain the familiar upstream result lines; `-vv` adds
 explicit action statuses, allocation details, and sparse-placement diagnostics.
+`--allow-equal-layout` permits relocation without a better donor run count;
+`--shake` also accepts worse layouts. These are optional movement policies;
+the usual eligibility checks and grouped allocation remain in effect.
 
 These e4defrag changes are experimental and should be tested before use.
 Fork-specific e4defrag bugs are the fork author's responsibility, not

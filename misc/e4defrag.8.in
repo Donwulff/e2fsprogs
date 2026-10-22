@@ -9,6 +9,11 @@ e4defrag \- online defragmenter for ext4 file system
 [
 .B \-v[v]
 ]
+[
+.B \-\-allow-equal-layout
+|
+.B \-\-shake
+]
 .I target
 \&...
 .SH DESCRIPTION
@@ -90,6 +95,34 @@ requested sizes, move calls, mapping retries, and effective hole, padding,
 and move-window settings.  Requested allocation bytes are not a claim that
 all space was allocated successfully.  Full after-maps are collected only
 at this verbosity level.
+.TP
+.B \-\-allow-equal-layout
+Attempt relocation even when the file already meets the estimated best
+extent count.  Accept a donor with no more contiguous data runs than the
+source, including an equal count.  This can change physical placement
+without reducing fragmentation.
+.TP
+.B \-\-shake
+Attempt relocation of every eligible allocated file, accepting even a
+donor with more contiguous data runs than the source.  This can increase
+fragmentation of the target file.  It may rearrange free space for later
+allocations, but improvement to other files is not guaranteed.
+.PP
+Without a movement option, files at the estimated best count are skipped
+and a donor must have fewer contiguous data runs than the source.
+The movement options also permit relocation of single-block files.
+They preserve grouped donor allocation and source holes, and do not bypass
+ownership, file-lock, free-space, or kernel eligibility checks.
+Empty files and files with no allocated blocks remain skipped.
+The two movement options are mutually exclusive and cannot be combined with
+.BR \-c .
+.PP
+Donor run counts are the existing candidate-selection heuristic.
+Because the donor can include allocation over source holes, accepting a
+donor does not guarantee an improvement in the resulting source layout.
+Use
+.B \-vv
+to inspect the selected policy and observed placement.
 .SH RESULTS
 Normal output and
 .B \-v
