@@ -291,7 +291,7 @@ treating preferred I/O size as RAID geometry.
 ## Runtime controls
 
 The executable accepts `-c` (statistics), `-v` (familiar extent-count output),
-and `-vv` (extended status and placement diagnostics). Movement policy is
+and `-vv` (compact extended file status and estimated best count). Movement policy is
 selected separately:
 
 | Option | Acceptance policy |
@@ -311,8 +311,9 @@ Equal-layout movement can rearrange physical placement without reducing the
 target's extent count. Shake can worsen the target's layout. Either may
 change the free-space arrangement available for later files, but neither
 guarantees that later allocations improve. The donor count remains a heuristic:
-it includes allocation over holes that the source retains. `-vv` reports
-the policy and the observed before/after source maps.
+it includes allocation over holes that the source retains. `-vv` shows
+observed before/after extent counts and whether blocks actually moved. Detailed
+placement measurements are available only in a `DEBUG` build.
 
 `ALIGN`, `SHAKE`, `NOLOCK`, `DEBUG`, and `DEBUG2` remain compile-time switches.
 Legacy `-DSHAKE` selects the equal-layout policy as the build default;

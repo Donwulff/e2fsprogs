@@ -52,9 +52,9 @@ option, the current fragmentation count and the ideal fragmentation count are
 printed for each file.
 For a single file,
 .B \-c \-v
-retains the extent-map dump;
+retains the extent-map dump.
 .B \-c \-vv
-also adds layout measurements.
+uses the same statistics output.
 .IP
 Also this option outputs the average data size in one extent. If you see it,
 you'll find the file has ideal extents or not. Note that the maximum extent
@@ -72,29 +72,20 @@ format, retaining bracketed
 and
 .B "[ NG ]"
 results.  A successful result can mean that the file required no movement.
+Early exclusions retain the filename and reason, such as "File size is 0",
+with the upstream-style NG marker; they do not print 100% OK.
 .TP
 .B \-vv
-Use explicit bracketed action statuses, show the estimated best extent
-count, and add source, donor, and observed after-layout diagnostics: allocated
-bytes, allocation groups, bridged holes, contiguous data runs, and spacing
-runs.  Data runs require both logical and physical continuity.  A spacing
-run may cross a small logical hole when the corresponding physical gap
-has the same size.  Groups are bounded by the current hole policy.
+Keep compact file lines, adding the estimated best extent count in parentheses
+and an explicit bracketed action status.  Skipped files show a short reason
+instead of a completion percentage.  Each file's result, including errors or
+partial movement, stays on one line so filtering by filename retains it.
+No per-file placement tables or allocation diagnostics are printed.
 .IP
-Before and after observations are comparable only when they cover the
-same allocated logical ranges and their physical mappings are usable.
-Changed coverage is reported, and unusable maps show unknown run counts.
-The estimated best count comes from filesystem geometry and is labelled as
-a fallback when geometry is unavailable. It does not guarantee an attainable
-layout. Placement measurements describe observations, not reserved space or
-measured speed.
-Concurrent changes can invalidate the comparison.
-.IP
-Diagnostics also report donor allocation requests and their total and largest
-requested sizes, move calls, mapping retries, and effective hole, padding,
-and move-window settings.  Requested allocation bytes are not a claim that
-all space was allocated successfully.  Full after-maps are collected only
-at this verbosity level.
+The estimated best count comes from filesystem geometry, falling back to 1
+when geometry is unavailable. It does not guarantee an attainable layout,
+especially for sparse files. Both verbosity levels collect a final extent
+count; detailed placement maps require a compile-time DEBUG build.
 .TP
 .B \-\-allow-equal-layout
 Attempt relocation even when the file already meets the estimated best
@@ -122,7 +113,8 @@ Because the donor can include allocation over source holes, accepting a
 donor does not guarantee an improvement in the resulting source layout.
 Use
 .B \-vv
-to inspect the selected policy and observed placement.
+to distinguish actual movement from skipped work, even when the before/after
+extent counts are equal.
 .SH RESULTS
 Normal output and
 .B \-v
@@ -141,7 +133,8 @@ The move operation completed but reported moving no blocks.
 .TP
 .B SKIPPED
 No movement was attempted because of an eligibility or policy decision.
-The reason is printed, including empty files, locks, and rejected donors.
+The reason appears on the same line, including empty files, locks, and
+rejected donors.
 .TP
 .B FAILED
 A required operation failed.  The stage and error are printed even without
@@ -149,9 +142,11 @@ A required operation failed.  The stage and error are printed even without
 Any known movement already completed is reported; failure does not undo it.
 .PP
 The Success/Failure summary excludes non-file directory entries from its
-file counts.  Normal policy skips count as successful processing;
+file counts. Normal exclusions are not operational failures, even though
+ordinary verbose output retains their upstream NG marker.
+Normal policy skips count as successful processing;
 .B \-vv
-adds the separate action counts.  A failed optional after-map measurement is a
+adds the separate action counts.  A failed optional final extent count is a
 warning and does not change the outcome of a completed move.
 .PP
 Final defragmentation result lines are written to standard output, followed

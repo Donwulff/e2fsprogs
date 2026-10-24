@@ -383,11 +383,11 @@ static void check_mapping_errors(void)
 	fclose(file);
 }
 
-static void run_file_case(const char *path, const struct stat64 *st,
+static const char *run_file_case(const char *path, const struct stat64 *st,
 			  int flag, enum defrag_outcome expected, const char *message)
 {
 	FILE *capture = tmpfile();
-	char output[8192];
+	static char output[8192];
 	size_t len;
 	int saved_stdout;
 
@@ -418,6 +418,34 @@ static void run_file_case(const char *path, const struct stat64 *st,
 		assert(move_count > 0);
 	if (expected == RESULT_SKIPPED || expected == RESULT_EXCLUDED)
 		assert(move_count == 0);
+#ifndef DEBUG
+	/* Both verbose modes use the cheap final count, not an extra full map. */
+	if (fixture && (expected == RESULT_MOVED || expected == RESULT_UNCHANGED))
+		assert(fixture_maps == 2);
+	/* A grep for the filename must retain the entire extended result. */
+	if (mode_flag & EXTENDED) {
+		const char *newline = strchr(output, '\n');
+
+		assert(!strncmp(output, "[1/1]", 5));
+		assert(newline && !newline[1]);
+	}
+#endif
+	return output;
+}
+
+static void expect_file_output(const char *output, const char *path,
+			       const char *suffix, int quoted)
+{
+	char expected[8192];
+
+	snprintf(expected, sizeof(expected), "[1/1]%s%s%s",
+		 quoted ? " \"" : "", path, suffix);
+#ifdef DEBUG
+	/* Debug builds intentionally add developer-only output. */
+	assert(strstr(output, expected));
+#else
+	assert(!strcmp(output, expected));
+#endif
 }
 
 static void run_main_case(int argc, char **argv, int expected, int expect_move)
@@ -443,6 +471,7 @@ static void run_main_case(int argc, char **argv, int expected, int expect_move)
 	assert(WIFEXITED(status) && WEXITSTATUS(status) == expected);
 }
 
+#ifdef DEBUG
 static void link_nodes(struct fiemap_extent_list *nodes, unsigned int count)
 {
 	unsigned int i;
@@ -490,6 +519,8 @@ static void check_layout_measurements(void)
 	assert(measure_layout(after).valid);
 }
 
+#endif
+
 static void check_file_results(void)
 {
 	char path[] = "/tmp/e4defrag-status-XXXXXX";
@@ -504,23 +535,64 @@ static void check_file_results(void)
 	current_uid = getuid();
 	interactive_output = mode_flag = 0;
 	lost_found_dir[0] = 0;
-	run_file_case(path, &st, FTW_F, RESULT_MOVED, "\t100%\t[ OK ]\n");
+	expect_file_output(run_file_case(path, &st, FTW_F, RESULT_MOVED, NULL),
+			   path, ":\t100%\t[ OK ]\n", 0);
 	mode_flag = DETAIL;
-	run_file_case(path, &st, FTW_F, RESULT_MOVED, "\t100%  extents: 3 -> 1\t[ OK ]\n");
-	mode_flag = DETAIL | DIAGNOSTIC;
-	run_file_case(path, &st, FTW_F, RESULT_MOVED, "(estimated best: 1, fallback)\t[ MOVED ]\n");
+	expect_file_output(run_file_case(path, &st, FTW_F, RESULT_MOVED, NULL),
+			   path, ":\t100%  extents: 3 -> 1\t[ OK ]\n", 0);
+	donor_runs = 3;
+	expect_file_output(run_file_case(path, &st, FTW_F, RESULT_SKIPPED, NULL),
+			   path, ":\t100%  extents: 3 -> 3\t[ OK ]\n", 0);
+	source_runs = 1;
+	expect_file_output(run_file_case(path, &st, FTW_F, RESULT_SKIPPED, NULL),
+			   path, ":\t100%  extents: 1 -> 1\t[ OK ]\n", 0);
+	source_runs = 3;
+	donor_runs = 1;
+	other = st;
+	other.st_size = 0;
+	expect_file_output(run_file_case(path, &other, FTW_F, RESULT_SKIPPED, NULL),
+			   path, "\"\n\tFile size is 0\t\t[ NG ]\n", 1);
+	other = st;
+	other.st_blocks = 0;
+	expect_file_output(run_file_case(path, &other, FTW_F, RESULT_SKIPPED, NULL),
+			   path, "\"\n\t# of file blocks <= 1\t\t[ NG ]\n", 1);
+	other.st_blocks = other.st_blksize / 512;
+	expect_file_output(run_file_case(path, &other, FTW_F, RESULT_SKIPPED, NULL),
+			   path, "\"\n\t# of file blocks <= 1\t\t[ NG ]\n", 1);
+	other.st_mode = S_IFDIR | 0700;
+	expect_file_output(run_file_case(path, &other, FTW_D, RESULT_EXCLUDED, NULL),
+			   path, "\"\n\tFile is not regular file\t\t[ NG ]\n", 1);
+	other.st_mode = S_IFLNK | 0700;
+	expect_file_output(run_file_case(path, &other, FTW_SL, RESULT_EXCLUDED, NULL),
+			   path, "\"\n\tFile is not regular file\t\t[ NG ]\n", 1);
+	lock_file = 1;
+	expect_file_output(run_file_case(path, &st, FTW_F, RESULT_SKIPPED, NULL),
+			   path, "\"\n\tFile has been locked\t\t[ NG ]\n", 1);
+	lock_file = 0;
+	mode_flag = 0;
+	assert(!*run_file_case(path, &other, FTW_SL, RESULT_EXCLUDED, NULL));
+	other = st;
+	other.st_size = 0;
+	assert(!*run_file_case(path, &other, FTW_F, RESULT_SKIPPED, NULL));
+	mode_flag = DETAIL | EXTENDED;
+	expect_file_output(run_file_case(path, &st, FTW_F, RESULT_MOVED, NULL),
+			   path, ":\t100%  extents: 3 -> 1 (1)\t[ MOVED ]\n", 0);
+	expect_file_output(run_file_case(path, &other, FTW_F, RESULT_SKIPPED, NULL),
+			   path, ":\tFile size is 0\t[ SKIPPED ]\n", 0);
 	mode_flag = DETAIL;
 	after_error = EIO;
 	run_file_case(path, &st, FTW_F, RESULT_MOVED, "final extent count unavailable");
-	mode_flag = DETAIL | DIAGNOSTIC;
+	mode_flag = DETAIL | EXTENDED;
 	run_file_case(path, &st, FTW_F, RESULT_MOVED, "final extent count unavailable");
 	after_error = 0;
-	mode_flag = DETAIL | DIAGNOSTIC;
+	mode_flag = DETAIL | EXTENDED;
 	donor_runs = 3;
-	run_file_case(path, &st, FTW_F, RESULT_SKIPPED, "donor not better");
+	expect_file_output(run_file_case(path, &st, FTW_F, RESULT_SKIPPED, NULL),
+			   path, ":\tNo better donor layout  extents: 3 -> 3 (1)\t[ SKIPPED ]\n", 0);
 	donor_runs = 1;
 	source_runs = 1;
-	run_file_case(path, &st, FTW_F, RESULT_SKIPPED, "already meets estimated target");
+	expect_file_output(run_file_case(path, &st, FTW_F, RESULT_SKIPPED, NULL),
+			   path, ":\tAlready at estimated best  extents: 1 -> 1 (1)\t[ SKIPPED ]\n", 0);
 	source_runs = 3;
 	allocation_error = ENOSPC;
 	run_file_case(path, &st, FTW_F, RESULT_FAILED, "allocating donor");
@@ -529,13 +601,13 @@ static void check_file_results(void)
 	run_file_case(path, &st, FTW_F, RESULT_FAILED, "checking free space");
 	no_space = 0;
 	lock_file = 1;
-	run_file_case(path, &st, FTW_F, RESULT_SKIPPED, "file locked");
+	run_file_case(path, &st, FTW_F, RESULT_SKIPPED, "File has been locked");
 	lock_file = 0;
 	move_error = EIO;
 	partial_blocks = 7;
 	run_file_case(path, &st, FTW_F, RESULT_FAILED, "28672 bytes already moved");
 	move_error = EFAULT;
-	run_file_case(path, &st, FTW_F, RESULT_FAILED, "Total movement is unknown");
+	run_file_case(path, &st, FTW_F, RESULT_FAILED, "total movement unknown");
 	move_error = 0;
 	partial_blocks = 0;
 	skipped_blocks = 30;
@@ -543,7 +615,7 @@ static void check_file_results(void)
 	skipped_blocks = 0;
 	other = st;
 	other.st_size = 0;
-	run_file_case(path, &other, FTW_F, RESULT_SKIPPED, "empty file");
+	run_file_case(path, &other, FTW_F, RESULT_SKIPPED, "File size is 0");
 	other.st_mode = S_IFDIR | 0700;
 	run_file_case(path, &other, FTW_D, RESULT_EXCLUDED, NULL);
 	run_file_case("bad\n\033name", NULL, FTW_NS, RESULT_FAILED,
@@ -576,7 +648,7 @@ static void check_movement_policies(void)
 	assert(fallocate(fd, 0, 0, fixture_blocks * block_size) == 0);
 	assert(fstat64(fd, &st) == 0);
 	fixture = 1;
-	mode_flag = DETAIL | DIAGNOSTIC;
+	mode_flag = DETAIL | EXTENDED;
 	current_uid = getuid();
 	source_runs = 3;
 	for (policy = MOVE_IMPROVE; policy <= MOVE_ANY; policy++) {
@@ -604,15 +676,15 @@ static void check_movement_policies(void)
 	assert(fstat64(fd, &st) == 0);
 	fixture_blocks = 1;
 	movement_policy = MOVE_IMPROVE;
-	run_file_case(path, &st, FTW_F, RESULT_SKIPPED, "at most one allocated block");
+	run_file_case(path, &st, FTW_F, RESULT_SKIPPED, "# of file blocks <= 1");
 	for (policy = MOVE_EQUAL; policy <= MOVE_ANY; policy++) {
 		movement_policy = policy;
 		run_file_case(path, &st, FTW_F, RESULT_MOVED, "extents: 1 -> 1");
 		lock_file = 1;
-		run_file_case(path, &st, FTW_F, RESULT_SKIPPED, "file locked");
+		run_file_case(path, &st, FTW_F, RESULT_SKIPPED, "File has been locked");
 		lock_file = 0;
 		current_uid = st.st_uid + 1;
-		run_file_case(path, &st, FTW_F, RESULT_SKIPPED, "another user");
+		run_file_case(path, &st, FTW_F, RESULT_SKIPPED, "not current user's file");
 		current_uid = getuid();
 		no_space = 1;
 		run_file_case(path, &st, FTW_F, RESULT_FAILED, "checking free space");
@@ -627,7 +699,7 @@ static void check_movement_policies(void)
 		assert(move_count == 1);
 		move_error = 0;
 		strcpy(lost_found_dir, path);
-		run_file_case(path, &st, FTW_F, RESULT_SKIPPED, "lost+found is excluded");
+		run_file_case(path, &st, FTW_F, RESULT_SKIPPED, "Can not process \"lost+found\"");
 		lost_found_dir[0] = 0;
 	}
 	{
@@ -654,8 +726,8 @@ static void check_movement_policies(void)
 	assert(other.st_blocks == 0);
 	for (policy = MOVE_EQUAL; policy <= MOVE_ANY; policy++) {
 		movement_policy = policy;
-		run_file_case(path, &st, FTW_F, RESULT_SKIPPED, "empty file");
-		run_file_case(path, &other, FTW_F, RESULT_SKIPPED, "no allocated blocks");
+		run_file_case(path, &st, FTW_F, RESULT_SKIPPED, "File size is 0");
+		run_file_case(path, &other, FTW_F, RESULT_SKIPPED, "No allocated blocks");
 	}
 	close(fd);
 	assert(unlink(path) == 0);
@@ -685,7 +757,9 @@ int main(void)
 	check_mapping_errors();
 	check_file_results();
 	check_movement_policies();
+#ifdef DEBUG
 	check_layout_measurements();
+#endif
 	fflush(stdout);
 	assert(dup2(saved_stdout, STDOUT_FILENO) >= 0);
 	close(saved_stdout);

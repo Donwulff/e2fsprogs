@@ -1,169 +1,104 @@
 # e4defrag status and verbosity
 
-Normal output and `-v` retain the familiar upstream presentation. The fork's
-additional action statuses and placement diagnostics are selected with
-`-vv`. This supersedes the earlier proposal to replace ordinary output with
-named fields separated by semicolons.
+## Ordinary output and `-v`
 
-## Normal output and `-v`
-
-A typical `-v` result remains:
+Keep the upstream file/progress format. In particular, `-v` adds only the
+usual before/after extent counts to completed file lines:
 
 ```text
-[1/1]data.db:    100%  extents: 48 -> 12    [ OK ]
+[1/4]data.db:    100%  extents: 48 -> 12    [ OK ]
+[2/4]other.db:   100%  extents: 2 -> 2     [ OK ]
 ```
 
-The filename/progress prefix, `extents: before -> after`, and `[ OK ]` /
-`[ NG ]` markers are retained. Normal output without `-v` omits the extent
-counts. Ordinary filename spelling is retained; control bytes in defrag
-result/progress lines are escaped. The `-c` tables and the single-file
-`-c -v` extent dump also retain their existing presentation.
+`[ OK ]` means processing completed. Like upstream, that includes deciding
+that the current layout is already good enough or that the donor offers no
+improvement. It does not mean that blocks moved. The default output without
+`-v` omits extent counts.
 
-`[ OK ]` means processing succeeded, including a normal decision to skip
-movement. It does not establish that blocks moved or access became faster.
-`[ NG ]` means a required operation failed; the following explanation names
-its stage and error. Known partial movement is always reported, regardless
-of verbosity. Errors are not hidden behind `-v`.
-
-Terminal progress updates the current line and never jumps to a fixed screen
-row. Files and pipes receive final records without cursor-control sequences
-or intermediate progress updates. `TERM=dumb` forces plain output for a
-terminal recorder such as Screen's built-in logging.
-
-The percentage follows logical file position, including holes. It describes
-processing progress, not percentage improvement or the share of allocated
-bytes moved. A skipped file can finish processing at 100% without movement.
-
-The `Success`, `Failure`, `Total extents`, and `Fragmented percentage` summary
-labels are retained. Success counts completed or skipped regular files;
-non-file directory entries no longer inflate the Failure count. Extent totals
-and percentages use files with available before/after observations, and a
-separate message identifies missing measurements. These bookkeeping fixes
-can change numbers compared with older runs.
-
-## Extended output with `-vv`
-
-The same result line adds an explicitly labelled estimate and an action:
+Early exclusions retain upstream's verbose filename and reason, for example:
 
 ```text
-[1/1]data.db:    100%  extents: 48 -> 12 (estimated best: 1)    [ MOVED ]
+[3/4] "empty.log"
+        File size is 0          [ NG ]
+[4/4] "directory"
+        File is not regular file        [ NG ]
 ```
+
+Empty, unallocated, one-block, locked, and non-regular entries must not turn
+into unexplained `100% [ OK ]` lines. Non-regular entries must not disappear
+from `-v` output. These normal exclusions are silent without `-v`; actual
+operational failures remain visible at every verbosity.
+
+`[ NG ]` on an upstream-style exclusion is not an operational failure or a
+nonzero exit status. The reason distinguishes an exclusion from an error.
+
+## Compact extended output with `-vv`
+
+Keep the filename, extent arrow, and final bracketed status. Add the estimated
+best count in parentheses and distinguish movement from skipped work:
+
+```text
+[1/4]data.db:    100%  extents: 48 -> 12 (1)    [ MOVED ]
+[2/4]other.db:   No better donor layout  extents: 2 -> 2 (1)    [ SKIPPED ]
+[3/4]empty.log:  File size is 0    [ SKIPPED ]
+[4/4]directory: File is not regular file    [ SKIPPED ]
+```
+
+Each file has one final line, including any error or partial-movement detail.
+Grepping a filename keeps its result and explanation together. There are no
+per-file placement tables, allocation summaries, timings, or settings dumps.
+Repeating `-v` more than twice does not enable developer diagnostics.
 
 | Status | Meaning |
 | --- | --- |
-| `[ MOVED ]` | The operation completed and the kernel reported moving blocks. |
-| `[ UNCHANGED ]` | The operation completed but reported moving zero blocks. An equal before/after extent count alone does not cause this status. |
-| `[ SKIPPED ]` | Movement was not attempted because of eligibility or policy; the next line gives the reason. |
-| `[ FAILED ]` | A required operation failed; any known movement before failure remains visible. |
+| `[ MOVED ]` | The operation completed and the kernel reported moving blocks, even if the extent count stayed the same or increased. |
+| `[ UNCHANGED ]` | A completed move operation reported moving zero blocks. |
+| `[ SKIPPED ]` | Movement was not attempted; the same line gives the reason. |
+| `[ FAILED ]` | A required operation failed; the same line identifies the error and any known partial movement. |
 
-A compact table compares the source, donor and observed result:
+The parenthesized count is the existing estimate based on allocated blocks
+and filesystem geometry. It falls back to 1 when geometry is unavailable.
+It is not a promise that this layout is attainable, especially for sparse
+files. Unknown observed extent counts are printed as `unknown`, never as 0.
+Both `-v` and `-vv` obtain a final extent count without collecting an extra
+full placement map.
 
-```text
-        Layout         Extents   Data runs   Spacing runs
-        Before              48          37             37
-        Donor                3           3              3
-        After               48          37              3
-```
+`-c` retains its statistics format, including the single-file `-c -v` extent
+dump. `-c -vv` uses that same output, without additional placement tables.
 
-This is an illustrative sparse layout, not a benchmark result. Additional
-lines describe source data size, bridged holes, allocation groups, donor
-requests and their total/largest sizes, moved data and elapsed time, move
-calls, mapping retries, and effective hole/window/padding settings. Sizes
-use familiar binary units. There is no machine-style key/value record.
+## Developer diagnostics
 
-The estimated best count uses allocated blocks and block-group/flex-group
-geometry. It does not describe all sparse-file constraints or available
-free space. When geometry is unavailable, the value 1 is explicitly labelled
-as a fallback. The estimate is not a guarantee of the optimal layout.
+Compile with `-DDEBUG` to collect and print the detailed source/donor/after
+placement measurements, allocation requests, moved bytes, timings, retry
+counts, and settings. These are development diagnostics, not another runtime
+verbosity level. Debug builds can produce additional lines at any verbosity.
 
-`-v` obtains a final extent count; `-vv` obtains a full after-map to calculate
-placement diagnostics. A failed optional measurement prints a warning and
-an unknown count instead of changing a completed move into a failure.
-`-c -vv` adds layout measurements while remaining read-only.
+The debug measurements distinguish data runs (logical and physical adjacency)
+from spacing runs (matching small logical and physical gaps). Before/after
+comparisons require unchanged allocated logical coverage and usable FIEMAP
+flags. See [donor grouping, holes, and alignment](E4DEFRAG-DONOR-ALLOCATION.md)
+for their interpretation and limitations.
 
-## Relocation without an extent-count improvement
+## Movement, logging, and errors
 
-Movement policy is independent of verbosity:
+`--allow-equal-layout` accepts a donor with fewer or equal contiguous data
+runs; `--shake` accepts any donor layout. Both can relocate a file already
+at the estimated best count. They change movement policy independently of
+verbosity and retain the usual eligibility checks. See
+[movement controls](E4DEFRAG-DONOR-ALLOCATION.md#runtime-controls).
 
-| Option | Donor accepted by the current run-count heuristic |
-| --- | --- |
-| Default | Fewer contiguous data runs; skip files already at the estimated best count |
-| `--allow-equal-layout` | Fewer or equal runs, including files already at the estimate |
-| `--shake` | Any count, including a worse layout |
+Terminal progress redraws the current line. Files and pipes receive final
+output without cursor-control sequences or intermediate progress updates.
+`TERM=dumb` also selects plain output for terminal recording. Ordinary path
+spelling is retained; control bytes in defrag result/progress lines are escaped.
 
-Both relocation options consider single-block files too, and retain the
-eligibility checks. They are mutually exclusive and cannot accompany `-c`.
-The existing grouped allocation and hole-preservation policy is unchanged.
-See [movement controls](E4DEFRAG-DONOR-ALLOCATION.md#runtime-controls).
+The percentage describes logical processing position, including holes,
+not improvement or the fraction of allocated bytes moved. Known partial
+movement is retained on error; an uncertain kernel result is identified as
+unknown. A failure does not undo exchanges already completed.
 
-`-vv` names the selected policy. A file successfully relocated from 12
-extents to 12, or from 12 to 20 under `--shake`, still reports `[ MOVED ]`.
-`[ UNCHANGED ]` means the kernel reported zero blocks moved, not an unchanged
-extent count. Ordinary `-v` retains `[ OK ]` and displays the observed
-before/after counts. A kernel rejection remains an error with every policy.
-
-## What the measurements mean
-
-- **Extents** count FIEMAP mapping records. Adjacent records need not imply
-  a physical discontinuity. A sparse gap needs separate mappings even when
-  surrounding data have useful physical spacing.
-- **Data runs** require continuity in both logical and physical offsets.
-  A sparse gap breaks a data run.
-- **Spacing runs** allow a small logical hole when the physical gap has the
-  same size. They are bounded by the source grouping policy: gaps of eight
-  or more filesystem blocks start another group.
-
-Within a group, consecutive mappings have the desired spacing when:
-
-```text
-B.physical_start - A.physical_end == B.logical_start - A.logical_end
-```
-
-The implementation avoids unsigned wraparound on backward physical jumps.
-Before/after comparisons require the same allocated logical coverage;
-splitting an extent does not by itself change that coverage. A changed
-coverage is explicitly reported as not comparable. Unknown, delayed,
-unaligned or otherwise unsuitable FIEMAP mappings cannot establish physical
-placement and display unknown run counts.
-
-These are observations of an online filesystem. The
-[kernel FIEMAP documentation](https://docs.kernel.org/filesystems/fiemap.html)
-allows a file to change between queries. A lower count is not a measured
-speed improvement. Spacing across holes does not reserve those free blocks.
-See [donor grouping and preserved holes](E4DEFRAG-DONOR-ALLOCATION.md).
-
-The donor can include allocation over source holes. Its raw extent or run
-count is therefore not interchangeable with the source's count. Donor
-comparison remains the existing candidate-selection heuristic; the after-map
-reports the actual source layout observed after movement.
-
-## Failure and script behavior
-
-Movement counts accumulate the kernel's `moved_len`, separately from logical
-progress. The [Linux move implementation](https://github.com/torvalds/linux/blob/v7.0/fs/ext4/move_extent.c#L574-L657)
-can report partial movement and return an error. Prior exchanges are not
-rolled back. If the result cannot be copied back reliably, output identifies
-the known minimum and says the total movement is unknown.
-
-Required-operation and traversal failures produce a nonzero exit status,
-even when other targets succeeded. Normal policy skips and optional
-measurement/cache-advice warnings do not. This fixes the old "any success"
-exit behavior. The primary move failure is preserved if synchronization or
-cleanup also fails.
-
-Ordinary line markers are retained to minimize disruption to existing grep
-usage. A formal machine-readable format remains future work; no `--json`
-option is implemented, and redirection does not implicitly select one.
-
-## Why the older verbosity patch was not applied
-
-The supplied alternate patch adds the same estimated best count already
-present in the fork, but uses unexplained `%`, `/`, `<`, and `>` markers.
-Its `[ FAIL ]` is on the successful move path immediately before
-`succeed_cnt++`; it does not detect failed or unhelpful movement.
-
-The fork's older `[ NOT ]` / `[ TRY ]` labels came from
-[`a55bc0d6`](https://github.com/Donwulff/e2fsprogs/commit/a55bc0d6) in September
-2024. They distinguished branch execution but not all actual outcomes.
-The exact supplied `[ FAIL ]` variant was not found in locally available
-Git refs; the other server's checkout was not inspected.
+Required-operation and traversal failures cause a nonzero exit status even
+when other targets succeed. Normal exclusions and optional measurement or
+cache-advice warnings do not. The existing Success/Failure, Total extents,
+and Fragmented percentage summaries remain; totals use available paired
+measurements and exclude non-file entries from file counts.

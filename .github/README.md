@@ -23,9 +23,10 @@ for the current algorithm, the changes made during the bug fixes, the original
 alignment experiment, and proposed runtime controls.
 
 See [Status and verbosity assessment](../doc/E4DEFRAG-STATUS-OUTPUT.md)
-for the status and diagnostic design and its implementation updates.
+for the output formats and status meanings.
 Normal output and `-v` retain the familiar upstream result lines; `-vv` adds
-explicit action statuses, allocation details, and sparse-placement diagnostics.
+a parenthesized estimated best count and explicit action statuses on the same
+compact file lines. Detailed placement diagnostics require a `DEBUG` build.
 `--allow-equal-layout` permits relocation without a better donor run count;
 `--shake` also accepts worse layouts. These are optional movement policies;
 the usual eligibility checks and grouped allocation remain in effect.
